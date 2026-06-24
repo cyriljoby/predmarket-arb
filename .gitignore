@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Project data outputs (generated at runtime)
+opportunities.jsonl
+matches.json
+backtest_report.json
+
+# Project spec / private instructions
+CLAUDE.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
