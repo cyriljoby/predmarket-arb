@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pmarb"
+version = "0.1.0"
+description = "Event-driven arbitrage detection and backtesting for prediction markets (Phase 1)"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "websockets>=12",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["pmarb*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

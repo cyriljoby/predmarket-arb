@@ -6,6 +6,12 @@ venv/
 *.egg-info/
 .pytest_cache/
 
+# Secrets / credentials — NEVER commit
+.env
+*.pem
+*.key
+*private*key*
+
 # Project data outputs (generated at runtime)
 opportunities.jsonl
 matches.json
