@@ -12,31 +12,19 @@ unit-testable against synthetic books.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 import aiohttp
 
+from pmarb.feeds._util import now_utc as _now_utc
+from pmarb.feeds._util import parse_iso_dt as _parse_dt
+from pmarb.feeds._util import to_float as _to_float
 from pmarb.models import Market, PriceLevel
 
 _REST = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 # --- pure helpers ---------------------------------------------------------- #
-def _to_float(x) -> float | None:
-    return float(x) if x is not None else None
-
-
-def _parse_dt(s: str | None) -> datetime | None:
-    """Parse a Kalshi ISO-8601 timestamp into a tz-aware UTC datetime."""
-    if not s:
-        return None
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
-
-
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _asks_from_bids(bid_levels: list) -> tuple[PriceLevel, ...]:
     """Convert one side's BID ladder into the OTHER side's ASK depth.
 
