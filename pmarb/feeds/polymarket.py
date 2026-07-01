@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 
 import aiohttp
@@ -33,6 +34,48 @@ _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+
+
+# Poly US futures/award markets share a GENERIC `question` ('FIFA World Cup
+# Winner' for every team) but carry a rich `description` that names the entity.
+# Strip the two boilerplate patterns: the "This market resolves to Yes if" lead-in
+# and the ", scheduled ..." date tail (the date is matched via `endDate` instead).
+_YES_IF_RE = re.compile(
+    r'^\s*this market (?:will settle|resolves?|settles?)\s+to\s+"?yes"?\s+if\s+',
+    re.IGNORECASE,
+)
+_SCHEDULED_RE = re.compile(r",\s*scheduled\b.*$", re.IGNORECASE)
+
+
+def _match_question(market: dict) -> str:
+    """The best descriptive question for matching.
+
+    Uses the description's first sentence (which names the entity, e.g. 'Will
+    Spain win the 2026 FIFA World Cup'), stripped of boilerplate. Falls back to
+    the raw question when there's no description. The FULL description is left
+    untouched in `raw` for the resolution-verification step.
+    """
+    desc = (market.get("description") or "").strip()
+    if not desc:
+        return market.get("question", "")
+    first = re.split(r"(?<=[.?!])\s+", desc, maxsplit=1)[0]
+    first = _YES_IF_RE.sub("", first)
+    first = _SCHEDULED_RE.sub("", first).strip()
+    return first or market.get("question", "")
+
+
+def _questions(market: dict) -> tuple[str, tuple[str, ...]]:
+    """The primary matching question plus any alias phrasings.
+
+    Primary = description-derived (names the entity, readable — fixes generic
+    futures questions). Alias = the raw question, kept because for game markets
+    it's already a clean, concise phrasing that matches better than the verbose
+    description. The matcher scores against both and takes the best.
+    """
+    raw_q = market.get("question", "")
+    primary = _match_question(market)
+    aliases = (raw_q,) if raw_q and raw_q != primary else ()
+    return primary, aliases
 
 
 # --- pure normalization ---------------------------------------------------- #
@@ -57,7 +100,8 @@ def normalize_market_data(
     return Market(
         id=f"polymarket_us:{market['slug']}",
         platform="polymarket_us",
-        question=market.get("question", ""),
+        question=_questions(market)[0],
+        match_aliases=_questions(market)[1],
         resolution_date=parse_iso_dt(market.get("endDate")),
         category=market.get("category") or "",
         yes_depth=_levels(offers, lambda p: p),          # YES ask = offer directly
@@ -74,7 +118,8 @@ def _market_metadata(market: dict, observed_at: datetime) -> Market:
     return Market(
         id=f"polymarket_us:{market['slug']}",
         platform="polymarket_us",
-        question=market.get("question", ""),
+        question=_questions(market)[0],
+        match_aliases=_questions(market)[1],
         resolution_date=parse_iso_dt(market.get("endDate")),
         category=market.get("category") or "",
         yes_depth=(),

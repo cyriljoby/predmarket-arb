@@ -53,6 +53,7 @@ class Market:
     raw: dict = field(default_factory=dict, repr=False)  # original payload, for debugging
     yes_bid: float | None = None         # reference only — not used by detection
     no_bid: float | None = None          # reference only — not used by detection
+    match_aliases: tuple[str, ...] = ()  # alt phrasings the matcher also scores against
 
     @property
     def yes_ask(self) -> float | None:

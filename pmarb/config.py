@@ -5,7 +5,7 @@ Single source of truth for tunable values so no magic numbers hide in logic.
 
 # Market Matching
 MATCH_THRESHOLD = 0.75            # min string similarity to flag a market pair. Needs to be tuned manually
-RESOLUTION_DATE_TOLERANCE_DAYS = 3  # resolution dates must fall within this window
+RESOLUTION_DATE_TOLERANCE_DAYS = 10  # resolution dates must fall within this window
 
 # Spread Detection
 SLIPPAGE_BUFFER = 0.01            # required headroom above fee-adjusted break-even (per share)

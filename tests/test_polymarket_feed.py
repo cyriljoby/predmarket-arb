@@ -3,7 +3,11 @@
 import asyncio
 from datetime import datetime, timezone
 
-from pmarb.feeds.polymarket import PolymarketUSFeed, normalize_market_data
+from pmarb.feeds.polymarket import (
+    PolymarketUSFeed,
+    _match_question,
+    normalize_market_data,
+)
 from pmarb.models import PriceLevel
 
 OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
@@ -59,6 +63,42 @@ class TestNormalization:
         assert m.yes_depth == ()
         assert m.no_depth == ()
         assert m.yes_ask is None and m.no_ask is None
+
+
+class TestMatchQuestion:
+    def test_futures_uses_description_entity(self):
+        m = {
+            "question": "FIFA World Cup Winner",
+            "description": "Will Spain win the 2026 FIFA World Cup, scheduled to "
+            "conclude July 19, 2026? If the event is postponed, delayed...",
+        }
+        assert _match_question(m) == "Will Spain win the 2026 FIFA World Cup"
+
+    def test_strips_settle_to_yes_if_leadin(self):
+        m = {
+            "question": "Pro Football MVP",
+            "description": "This market will settle to Yes if Tyler Shough wins the "
+            "Pro Football AP MVP Award for the 2026-27 regular season. Outcome "
+            "sourced from the relevant governing body.",
+        }
+        assert _match_question(m) == (
+            "Tyler Shough wins the Pro Football AP MVP Award for the 2026-27 "
+            "regular season."
+        )
+
+    def test_strips_scheduled_tail(self):
+        m = {
+            "question": "x",
+            "description": "This market resolves to Yes if Misa Esports wins Map 2 "
+            "vs Inner Circle Academy, scheduled for July 1, 2026 at 10:30 AM UTC. "
+            "Otherwise No.",
+        }
+        assert _match_question(m) == "Misa Esports wins Map 2 vs Inner Circle Academy"
+
+    def test_falls_back_to_question_without_description(self):
+        assert _match_question({"question": "National League Champion"}) == (
+            "National League Champion"
+        )
 
 
 class TestTradeableFilter:
