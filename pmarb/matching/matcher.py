@@ -75,6 +75,7 @@ class MatchCandidate:
     resolution_match: bool | None = None  # set MANUALLY during review
     resolution_notes: str = ""
     verified_by: str | None = None
+    match_method: str = "lexical"  # "lexical" | "structured"
 
 
 class RuleBasedMatcher:

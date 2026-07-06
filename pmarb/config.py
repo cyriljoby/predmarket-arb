@@ -6,6 +6,16 @@ Single source of truth for tunable values so no magic numbers hide in logic.
 # Market Matching
 MATCH_THRESHOLD = 0.75            # min string similarity to flag a market pair. Needs to be tuned manually
 RESOLUTION_DATE_TOLERANCE_DAYS = 10  # resolution dates must fall within this window
+# Futures/outright matching (structured). Venues pad outright resolution dates
+# more loosely than games, so a wider window; season disambiguation still leans
+# on it because competition strings drop the year.
+FUTURES_DATE_TOLERANCE_DAYS = 30
+FUTURES_ENTITY_MIN = 0.6         # min entity-name score (reuses competitor_score)
+# Min normalized-competition overlap. 0.65 (not 0.5) because a single shared
+# common token — "James" in "James Harden" vs "LeBron James", "NASCAR"/"Series"
+# across Truck vs Cup — otherwise pairs different contracts. Same-competition
+# matches score ~0.75-1.0 and clear it comfortably.
+FUTURES_COMPETITION_MIN = 0.65
 
 # Spread Detection
 SLIPPAGE_BUFFER = 0.01            # required headroom above fee-adjusted break-even (per share)

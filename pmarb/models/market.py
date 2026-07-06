@@ -11,13 +11,46 @@ from datetime import datetime
 from typing import NamedTuple
 
 
-class PriceLevel(NamedTuple):
-    """One level of order-book depth.
-
-    A NamedTuple so it reads as `level.price` / `level.size`, while still being
-    a plain (price, size) tuple — indexable and unpackable — for anything that
-    expects the raw tuple form.
+@dataclass(frozen=True, slots=True)
+class SportsEvent:
+    """Structured identity for head to head sports events, which are the only markets that can be reliably matched across venues.
+    Allows matcher to algin markets with different phrasings, and detector to know which competitor is YES vs NO.
     """
+
+    league: str
+    start_time: datetime | None
+    competitors: tuple[str, str]
+    yes_competitor: str
+    yes_abbrev: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesEvent:
+    """Structured identity of an entity-outright market ("will ENTITY win/be X").
+
+    Grounds tournament winners, championships, appointments, and "next team"
+    markets in (competition, entity) so cross-venue matching is one-to-one
+    instead of the lexical matcher's many-to-many text inflation. Both fields
+    stored raw; the matcher normalizes. Class -> wire-field mapping (uniform
+    across every outright class):
+
+        field         Kalshi                     Polymarket US
+        entity        market["yes_sub_title"]    market["title"]
+        competition   enclosing event["title"]   market["question"]
+
+    entity = the outright subject ("Ludvig Aberg"); competition = the shared
+    question every entity answers ("Genesis Scottish Open Winner"). The Market's
+    resolution_date + category disambiguate season/sport. Feeds return None for
+    scalar/threshold markets ("At least 2.0%") — those aren't outrights.
+    """
+
+    entity: str
+    competition: str
+    entity_abbrev: str = ""
+
+
+class PriceLevel(NamedTuple):
+    """One level of order-book depth."""
 
     price: float
     size: float
@@ -31,15 +64,13 @@ class Market:
     rather than mutating a shared object, which keeps the detector free of
     aliasing bugs across the two async feeds.
 
-    Depth is ASK-side — the cost to BUY — sorted best (cheapest) first.
+    Depth is ASK-side, the cost to buy, sorted best (cheapest) first.
     `yes_depth` answers "buy YES"; `no_depth` answers "buy NO". This is the only
-    side the arb detector walks (a hedge buys both legs). On Kalshi these ladders
-    are *derived* from the venue's bid ladders (a YES ask == a NO bid at 1-price);
-    that derivation lives in the feed, never here.
+    side the arb detector walks (a hedge buys both legs). 
 
-    `yes_ask` / `no_ask` are intentionally NOT stored — they are the top of the
-    depth ladder, so they're exposed as properties to guarantee they can never
-    drift out of sync with the depth they summarize.
+    Ask-side depth (yes_depth/no_depth) is what the system trades on and walks for slippage.
+    At each level: price is how much one share costs there, and size is how many shares are available at that price.
+    
     """
 
     id: str                              # internal id, e.g. "kalshi:KXELONMARS-99"
@@ -54,6 +85,10 @@ class Market:
     yes_bid: float | None = None         # reference only — not used by detection
     no_bid: float | None = None          # reference only — not used by detection
     match_aliases: tuple[str, ...] = ()  # alt phrasings the matcher also scores against
+    # At most ONE is set: a market is a head-to-head game, an entity-outright,
+    # or unstructured (both None -> lexical matcher).
+    event: SportsEvent | None = None     # head-to-head game (moneyline markets)
+    futures: FuturesEvent | None = None  # entity-outright (winner/next/appointment)
 
     @property
     def yes_ask(self) -> float | None:

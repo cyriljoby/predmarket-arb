@@ -10,13 +10,16 @@ Run: .venv/bin/python scripts/export_candidates.py
 
 import asyncio
 import json
+from collections import Counter
 
 import aiohttp
 
 from pmarb.credentials import PolymarketUSCredentials
 from pmarb.feeds.kalshi import KalshiFeed
 from pmarb.feeds.polymarket import PolymarketUSFeed
+from pmarb.matching.futures import FuturesMatcher
 from pmarb.matching.matcher import RuleBasedMatcher, write_matches
+from pmarb.matching.structured import StructuredMatcher
 
 
 async def main() -> None:
@@ -25,7 +28,21 @@ async def main() -> None:
         kalshi = await KalshiFeed(session).fetch_markets()
         poly = await PolymarketUSFeed(session, creds).fetch_markets()
 
-    candidates = RuleBasedMatcher().match(kalshi, poly)
+    # Priority order: structured games, then structured outrights, then lexical
+    # for everything unstructured. Each layer dedupes against the pairs already
+    # claimed by a higher-priority (more precise) layer.
+    structured = StructuredMatcher().match(kalshi, poly)
+    futures = FuturesMatcher().match(kalshi, poly)
+    lexical = RuleBasedMatcher().match(kalshi, poly)
+
+    candidates: list = []
+    seen: set = set()
+    for group in (structured, futures, lexical):
+        for c in group:
+            key = (c.kalshi_id, c.polymarket_id)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(c)
     write_matches(candidates)  # -> matches.json
 
     by_id = {m.id: m for m in kalshi + poly}
@@ -35,6 +52,7 @@ async def main() -> None:
         p = by_id[c.polymarket_id].raw.get("market", {})
         review.append(
             {
+                "match_method": c.match_method,
                 "similarity_score": c.similarity_score,
                 "resolution_date_delta_days": c.resolution_date_delta_days,
                 "kalshi": {
@@ -54,7 +72,10 @@ async def main() -> None:
     with open("matches_review.json", "w") as f:
         json.dump(review, f, indent=2)
 
-    print(f"candidates: {len(candidates)}")
+    kept = Counter(c.match_method for c in candidates)
+    print(f"candidates: {len(candidates)}  "
+          f"(structured {kept['structured']}, futures {kept['futures']}, "
+          f"lexical {kept['lexical']})")
     print("wrote matches.json and matches_review.json")
 
 

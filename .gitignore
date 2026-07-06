@@ -15,6 +15,7 @@ venv/
 # Project data outputs (generated at runtime)
 opportunities.jsonl
 matches.json
+matches_review.json
 backtest_report.json
 
 # Project spec / private instructions

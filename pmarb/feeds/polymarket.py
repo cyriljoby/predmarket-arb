@@ -22,9 +22,9 @@ import aiohttp
 import websockets
 
 from pmarb.credentials import PolymarketUSCredentials
-from pmarb.feeds._util import now_utc, parse_iso_dt
+from pmarb.feeds._util import is_entity, now_utc, parse_iso_dt
 from pmarb.feeds.auth import polymarket_us_headers
-from pmarb.models import Market, PriceLevel
+from pmarb.models import FuturesEvent, Market, PriceLevel, SportsEvent
 
 _GATEWAY = "https://gateway.polymarket.us"
 _WS_URL = "wss://api.polymarket.us/v1/ws/markets"
@@ -64,15 +64,77 @@ def _match_question(market: dict) -> str:
     return first or market.get("question", "")
 
 
-def _questions(market: dict) -> tuple[str, tuple[str, ...]]:
+def _sports_event(market: dict) -> SportsEvent | None:
+    """Structured game identity for a moneyline market, or None.
+
+    Poly US moneylines are categorical two-outcome markets (outcomes are the
+    two competitors, not Yes/No). `marketSides` carries full team objects with
+    `name`, `abbreviation`, and `league`; exactly one side is `long: true`,
+    and the order book quotes THAT side (verified live: best offer == the long
+    side's price). So Market.yes_depth means "buy the long competitor".
+    """
+    if market.get("marketType") != "moneyline":
+        return None
+    sides = market.get("marketSides") or []
+    longs = [s for s in sides if s.get("long")]
+    teams = [s.get("team") or {} for s in sides]
+    if len(sides) != 2 or len(longs) != 1 or not all(t.get("name") for t in teams):
+        return None
+    long_team = (longs[0].get("team") or {})
+    league = (long_team.get("league") or "").lower()
+    # Cricket competitions collapse into one block (see Kalshi feed's map).
+    if league.startswith("t20") or league in ("mlc", "odi", "test"):
+        league = "cricket"
+    if not league:
+        return None
+    return SportsEvent(
+        league=league,
+        start_time=parse_iso_dt(market.get("gameStartTime")),
+        competitors=(teams[0]["name"], teams[1]["name"]),
+        yes_competitor=long_team.get("name", ""),
+        yes_abbrev=(long_team.get("abbreviation") or "").lower(),
+    )
+
+
+def _futures_event(market: dict) -> FuturesEvent | None:
+    """Entity-outright identity for a Poly futures market, or None.
+
+    entity = `title` (the outright subject); competition = `question` (the
+    shared prompt). Only `marketType == "futures"`; None for threshold/scalar
+    titles ("At least 2.0%"), which `is_entity` rejects.
+    """
+    if market.get("marketType") != "futures":
+        return None
+    entity = (market.get("title") or "").strip()
+    competition = (market.get("question") or "").strip()
+    if not competition or not is_entity(entity):
+        return None
+    # slug tail entity token, e.g. "...-w-ludabe" -> "ludabe"
+    return FuturesEvent(
+        entity=entity,
+        competition=competition,
+        entity_abbrev=market.get("slug", "").rsplit("-", 1)[-1].lower(),
+    )
+
+
+def _questions(
+    market: dict, event: SportsEvent | None = None
+) -> tuple[str, tuple[str, ...]]:
     """The primary matching question plus any alias phrasings.
 
     Primary = description-derived (names the entity, readable — fixes generic
     futures questions). Alias = the raw question, kept because for game markets
     it's already a clean, concise phrasing that matches better than the verbose
     description. The matcher scores against both and takes the best.
+
+    Moneyline questions aren't questions at all ("Max Holloway vs. Conor
+    McGregor") and carry no YES semantics, so when the market has a structured
+    `event` the primary is synthesized to say what YES actually pays on.
     """
     raw_q = market.get("question", "")
+    if event is not None:
+        a, b = event.competitors
+        return f"Will {event.yes_competitor} win {a} vs. {b}?", (raw_q,) if raw_q else ()
     primary = _match_question(market)
     aliases = (raw_q,) if raw_q and raw_q != primary else ()
     return primary, aliases
@@ -97,11 +159,15 @@ def normalize_market_data(
     offers = market_data.get("offers") or []  # YES asks, ascending
     best_bid = max((float(b["px"]["value"]) for b in bids), default=None)
     best_offer = min((float(o["px"]["value"]) for o in offers), default=None)
+    ev = _sports_event(market)
+    question, aliases = _questions(market, ev)
     return Market(
         id=f"polymarket_us:{market['slug']}",
         platform="polymarket_us",
-        question=_questions(market)[0],
-        match_aliases=_questions(market)[1],
+        question=question,
+        match_aliases=aliases,
+        event=ev,
+        futures=None if ev else _futures_event(market),
         resolution_date=parse_iso_dt(market.get("endDate")),
         category=market.get("category") or "",
         yes_depth=_levels(offers, lambda p: p),          # YES ask = offer directly
@@ -115,11 +181,15 @@ def normalize_market_data(
 
 def _market_metadata(market: dict, observed_at: datetime) -> Market:
     """A metadata-only Market (empty depth) for discovery/matching."""
+    ev = _sports_event(market)
+    question, aliases = _questions(market, ev)
     return Market(
         id=f"polymarket_us:{market['slug']}",
         platform="polymarket_us",
-        question=_questions(market)[0],
-        match_aliases=_questions(market)[1],
+        question=question,
+        match_aliases=aliases,
+        event=ev,
+        futures=None if ev else _futures_event(market),
         resolution_date=parse_iso_dt(market.get("endDate")),
         category=market.get("category") or "",
         yes_depth=(),

@@ -1,5 +1,5 @@
 """Shared data contracts."""
 
-from pmarb.models.market import Market, PriceLevel
+from pmarb.models.market import FuturesEvent, Market, PriceLevel, SportsEvent
 
-__all__ = ["Market", "PriceLevel"]
+__all__ = ["FuturesEvent", "Market", "PriceLevel", "SportsEvent"]
