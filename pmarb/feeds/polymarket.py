@@ -17,6 +17,7 @@ import asyncio
 import json
 import re
 from datetime import datetime
+from typing import AsyncIterator
 
 import aiohttp
 import websockets
@@ -284,3 +285,54 @@ class PolymarketUSFeed:
             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
             md = json.loads(raw).get("marketData")
             return normalize_market_data(meta, md, now_utc()) if md else None
+
+    _SUB_BATCH = 200  # max marketSlugs per subscribe message
+
+    async def stream_books(
+        self, markets: list[Market], *, reconnect: bool = True
+    ) -> AsyncIterator[Market]:
+        """Continuously yield a fresh full-depth Market on every book update.
+
+        Holds ONE authenticated socket open, subscribes to every market's slug
+        (batched by `_SUB_BATCH`), and yields a normalized Market per
+        `marketData` message. Each Poly US message is a FULL snapshot, so there
+        is no delta state to maintain — every yield is a complete book.
+
+        On a dropped connection it reconnects and resubscribes (unless
+        `reconnect=False`); the consumer's staleness gate covers the blind gap.
+        Structured identity (event/futures) is recomputed from the market dict,
+        so it survives streaming exactly as at discovery.
+        """
+        meta_by_slug = {
+            m.raw["market"]["slug"]: m.raw["market"]
+            for m in markets
+            if m.raw.get("market", {}).get("slug")
+        }
+        slugs = list(meta_by_slug)
+
+        while True:
+            headers = {
+                **polymarket_us_headers(self._creds, "GET", _WS_PATH),
+                "User-Agent": _UA,
+            }
+            try:
+                async with websockets.connect(
+                    _WS_URL, additional_headers=headers
+                ) as ws:
+                    for i in range(0, len(slugs), self._SUB_BATCH):
+                        await ws.send(json.dumps({"subscribe": {
+                            "requestId": f"pmarb{i}",
+                            "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+                            "marketSlugs": slugs[i:i + self._SUB_BATCH],
+                        }}))
+                    async for raw in ws:
+                        md = json.loads(raw).get("marketData")
+                        slug = md.get("marketSlug") if md else None
+                        if slug in meta_by_slug:
+                            yield normalize_market_data(
+                                meta_by_slug[slug], md, now_utc()
+                            )
+            except websockets.ConnectionClosed:
+                if not reconnect:
+                    raise
+                await asyncio.sleep(1.0)  # brief backoff, then reconnect+resubscribe
