@@ -12,19 +12,28 @@ unit-testable against synthetic books.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+from dataclasses import replace
 from datetime import datetime
+from typing import AsyncIterator
 from zoneinfo import ZoneInfo
 
 import aiohttp
+import websockets
 
+from pmarb.credentials import KalshiCredentials
 from pmarb.feeds._util import is_entity as _is_entity
 from pmarb.feeds._util import now_utc as _now_utc
 from pmarb.feeds._util import parse_iso_dt as _parse_dt
 from pmarb.feeds._util import to_float as _to_float
+from pmarb.feeds.auth import kalshi_headers
 from pmarb.models import FuturesEvent, Market, PriceLevel, SportsEvent
 
 _REST = "https://api.elections.kalshi.com/trade-api/v2"
+_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+_WS_PATH = "/trade-api/ws/v2"
 
 # --- structured game identity ---------------------------------------------- #
 # Head-to-head series whose event tickers encode the game (date, time, teams)
@@ -233,8 +242,13 @@ class KalshiFeed:
 
     platform = "kalshi"
 
-    def __init__(self, session: aiohttp.ClientSession):
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        credentials: KalshiCredentials | None = None,
+    ):
         self._session = session
+        self._creds = credentials  # required only for stream_books (WS is authed)
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
         async with self._session.get(
@@ -293,6 +307,86 @@ class KalshiFeed:
             market.raw["market"], ob.get("orderbook_fp", {}), _now_utc()
         )
 
-    # stream_books(): the WebSocket streaming async generator is the next build
-    # step. Omitted (rather than stubbed) so readers and the type checker see
-    # exactly what is implemented today — REST discovery + book fetch.
+    async def stream_books(
+        self, markets: list[Market], *, reconnect: bool = True
+    ) -> AsyncIterator[Market]:
+        """Continuously yield a fresh full-depth Market on every book update.
+
+        Unlike Poly (full snapshots), Kalshi pushes an initial `orderbook_snapshot`
+        per ticker then incremental `orderbook_delta`s, so this MAINTAINS book
+        state: a snapshot replaces a ticker's bid ladders; a delta adjusts one
+        (price, side) level by a signed size. After each message the affected
+        ticker's book is re-normalized (asks derived from bids, as at REST) and
+        yielded, carrying its discovery-time structured identity.
+
+        `seq` is a single monotonic counter for the subscription; a gap means a
+        dropped message, so we tear down and resubscribe (fresh snapshots). Also
+        reconnects on a closed socket unless `reconnect=False`.
+        """
+        if self._creds is None:
+            raise RuntimeError("Kalshi stream_books requires credentials")
+        meta = {
+            m.raw["market"]["ticker"]: m
+            for m in markets
+            if m.raw.get("market", {}).get("ticker")
+        }
+        tickers = list(meta)
+
+        while True:
+            # books: ticker -> {"yes": {price_str: size}, "no": {price_str: size}}
+            books: dict[str, dict[str, dict[str, float]]] = {}
+            last_seq: int | None = None
+            try:
+                headers = kalshi_headers(self._creds, "GET", _WS_PATH)
+                async with websockets.connect(
+                    _WS_URL, additional_headers=headers
+                ) as ws:
+                    await ws.send(json.dumps({
+                        "id": 1, "cmd": "subscribe",
+                        "params": {
+                            "channels": ["orderbook_delta"],
+                            "market_tickers": tickers,
+                        },
+                    }))
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        typ = msg.get("type")
+                        if typ not in ("orderbook_snapshot", "orderbook_delta"):
+                            continue  # 'subscribed' ack, errors, etc.
+                        seq = msg.get("seq")
+                        if seq is not None:
+                            if last_seq is not None and seq != last_seq + 1:
+                                break  # gap -> reconnect & resnapshot
+                            last_seq = seq
+                        body = msg.get("msg") or {}
+                        ticker = body.get("market_ticker")
+                        if ticker not in meta:
+                            continue
+                        book = books.setdefault(ticker, {"yes": {}, "no": {}})
+                        if typ == "orderbook_snapshot":
+                            book["yes"] = {p: float(s)
+                                           for p, s in (body.get("yes_dollars_fp") or [])}
+                            book["no"] = {p: float(s)
+                                          for p, s in (body.get("no_dollars_fp") or [])}
+                        else:  # orderbook_delta
+                            side = body.get("side")
+                            price = body.get("price_dollars")
+                            levels = book.get(side)
+                            if levels is None or price is None:
+                                continue
+                            levels[price] = levels.get(price, 0.0) + float(
+                                body.get("delta_fp", 0.0)
+                            )
+                            if levels[price] <= 1e-9:
+                                levels.pop(price, None)
+                        ob = {
+                            "yes_dollars": list(book["yes"].items()),
+                            "no_dollars": list(book["no"].items()),
+                        }
+                        base = meta[ticker]
+                        mk = normalize_orderbook(base.raw["market"], ob, _now_utc())
+                        yield replace(mk, event=base.event, futures=base.futures)
+            except websockets.ConnectionClosed:
+                if not reconnect:
+                    raise
+                await asyncio.sleep(1.0)  # brief backoff, then reconnect + resubscribe

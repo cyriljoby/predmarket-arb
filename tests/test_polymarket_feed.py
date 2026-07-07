@@ -154,3 +154,73 @@ class TestPagination:
             "polymarket_us:a", "polymarket_us:b", "polymarket_us:c"
         ]
         assert calls == [0, 2]  # offsets advanced by PAGE
+
+
+class TestStreamBooks:
+    """Offline test of the WS streaming loop (mocked socket)."""
+
+    class _FakeWS:
+        def __init__(self, messages):
+            self._it = iter(messages)
+            self.sent = []
+
+        async def send(self, m):
+            self.sent.append(m)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            import websockets
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise websockets.ConnectionClosed(None, None)  # end the stream
+
+    class _FakeConnect:
+        def __init__(self, ws):
+            self._ws = ws
+
+        async def __aenter__(self):
+            return self._ws
+
+        async def __aexit__(self, *a):
+            return False
+
+    def test_yields_markets_and_batches_subscribe(self, monkeypatch):
+        import json
+        import websockets
+
+        from pmarb.feeds import polymarket as pmod
+
+        meta = {**MARKET, "slug": "slug-a"}
+        market = pmod._market_metadata(meta, OBSERVED)
+        messages = [
+            json.dumps({"marketData": {"marketSlug": "slug-a", **MARKET_DATA}}),
+            json.dumps({"marketData": {"marketSlug": "not-subscribed", **MARKET_DATA}}),
+        ]
+        ws = self._FakeWS(messages)
+        monkeypatch.setattr(pmod.websockets, "connect",
+                            lambda *a, **k: self._FakeConnect(ws))
+        monkeypatch.setattr(pmod, "polymarket_us_headers", lambda *a, **k: {})
+
+        feed = PolymarketUSFeed.__new__(PolymarketUSFeed)
+        feed._creds = None
+
+        async def collect():
+            out = []
+            try:
+                async for m in feed.stream_books([market], reconnect=False):
+                    out.append(m)
+            except websockets.ConnectionClosed:
+                pass
+            return out
+
+        out = asyncio.run(collect())
+        # only the subscribed slug is yielded; unknown slug ignored
+        assert len(out) == 1
+        assert out[0].id == "polymarket_us:slug-a"
+        assert out[0].yes_ask == 0.41
+        # one subscribe message sent, carrying the slug
+        assert len(ws.sent) == 1
+        assert json.loads(ws.sent[0])["subscribe"]["marketSlugs"] == ["slug-a"]

@@ -123,3 +123,112 @@ class TestPagination:
         feed, _ = self._feed_returning([page])
         markets = asyncio.run(feed.fetch_markets())
         assert [m.id for m in markets] == ["kalshi:GOOD"]
+
+
+class TestStreamBooks:
+    """Offline test of the WS delta bookkeeping (mocked socket)."""
+
+    class _FakeWS:
+        def __init__(self, messages):
+            self._it = iter(messages)
+            self.sent = []
+
+        async def send(self, m):
+            self.sent.append(m)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            import websockets
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise websockets.ConnectionClosed(None, None)
+
+    class _FakeConnect:
+        def __init__(self, ws):
+            self._ws = ws
+
+        async def __aenter__(self):
+            return self._ws
+
+        async def __aexit__(self, *a):
+            return False
+
+    def _run(self, monkeypatch, messages):
+        import json
+        import websockets
+
+        from pmarb.feeds import kalshi as kmod
+
+        market = kmod._market_metadata(
+            {"ticker": "T", "title": "Q", "close_time": "2026-09-01T00:00:00Z"},
+            OBSERVED,
+        )
+        ws = self._FakeWS([json.dumps(m) for m in messages])
+        monkeypatch.setattr(kmod.websockets, "connect",
+                            lambda *a, **k: self._FakeConnect(ws))
+        monkeypatch.setattr(kmod, "kalshi_headers", lambda *a, **k: {})
+        feed = KalshiFeed.__new__(KalshiFeed)
+        feed._creds = object()
+
+        async def collect():
+            out = []
+            try:
+                async for m in feed.stream_books([market], reconnect=False):
+                    out.append(m)
+            except websockets.ConnectionClosed:
+                pass
+            return out
+
+        return asyncio.run(collect())
+
+    def test_snapshot_then_delta_maintains_book(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            {"type": "subscribed", "id": 1, "msg": {"sid": 1}},  # ignored
+            {"type": "orderbook_snapshot", "seq": 1, "msg": {
+                "market_ticker": "T",
+                "yes_dollars_fp": [["0.60", "100.0"]],   # YES bid -> NO ask 0.40 x100
+                "no_dollars_fp": [["0.30", "200.0"]],    # NO bid  -> YES ask 0.70 x200
+            }},
+            {"type": "orderbook_delta", "seq": 2, "msg": {
+                "market_ticker": "T", "side": "no",
+                "price_dollars": "0.30", "delta_fp": "-50.0",  # NO bid 200 -> 150
+            }},
+        ])
+        assert len(out) == 2
+        # snapshot: asks derived from the opposite side's bids
+        assert out[0].yes_ask == 0.70 and out[0].no_ask == 0.40
+        assert out[0].yes_depth[0].size == 200.0
+        # delta shrank the NO bid -> YES ask size drops to 150
+        assert out[1].yes_depth[0].price == 0.70
+        assert out[1].yes_depth[0].size == 150.0
+
+    def test_delta_removing_a_level_drops_it(self, monkeypatch):
+        out = self._run(monkeypatch, [
+            {"type": "orderbook_snapshot", "seq": 1, "msg": {
+                "market_ticker": "T",
+                "yes_dollars_fp": [], "no_dollars_fp": [["0.30", "40.0"]],
+            }},
+            {"type": "orderbook_delta", "seq": 2, "msg": {
+                "market_ticker": "T", "side": "no",
+                "price_dollars": "0.30", "delta_fp": "-40.0",  # zeroes the level
+            }},
+        ])
+        assert out[0].yes_depth[0].size == 40.0
+        assert out[1].yes_depth == ()  # level removed -> empty ask ladder
+
+    def test_seq_gap_stops_the_stream(self, monkeypatch):
+        # snapshot seq=1, then a delta at seq=5 (gap) -> break before yielding it
+        out = self._run(monkeypatch, [
+            {"type": "orderbook_snapshot", "seq": 1, "msg": {
+                "market_ticker": "T",
+                "yes_dollars_fp": [], "no_dollars_fp": [["0.30", "40.0"]],
+            }},
+            {"type": "orderbook_delta", "seq": 5, "msg": {
+                "market_ticker": "T", "side": "no",
+                "price_dollars": "0.30", "delta_fp": "-10.0",
+            }},
+        ])
+        assert len(out) == 1  # only the snapshot; gap broke the loop before the delta
