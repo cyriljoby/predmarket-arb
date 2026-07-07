@@ -81,6 +81,39 @@ class TestMatch:
         assert len(RuleBasedMatcher(threshold=0.4).match(k, p)) == 1
 
 
+class TestMultiOutcomeGuard:
+    def _structured(self, platform, mid, q):
+        from pmarb.models import FuturesEvent
+        return Market(
+            id=f"{platform}:{mid}", platform=platform, question=q,
+            resolution_date=DAY, category="", yes_depth=(), no_depth=(),
+            updated_at=DAY,
+            futures=FuturesEvent(entity="X", competition="C"),
+        )
+
+    def test_skips_markets_with_structured_identity(self):
+        # Identical text, but both carry structured identity -> lexical refuses
+        # (they belong to the futures/structured tiers, not fuzzy text).
+        k = [self._structured("kalshi", "K1", "Will the Chargers beat the Titans?")]
+        p = [self._structured("polymarket_us", "P1", "Will the Chargers beat the Titans?")]
+        assert RuleBasedMatcher().match(k, p) == []
+
+    def test_still_matches_unstructured(self):
+        k = [mkt("kalshi", "K1", "Will the Chargers beat the Titans?")]
+        p = [mkt("polymarket_us", "P1", "Will the Chargers beat the Titans?")]
+        assert len(RuleBasedMatcher().match(k, p)) == 1
+
+    def test_skips_pair_if_either_side_structured(self):
+        k = [self._structured("kalshi", "K1", "Will the Chargers beat the Titans?")]
+        p = [mkt("polymarket_us", "P1", "Will the Chargers beat the Titans?")]
+        assert RuleBasedMatcher().match(k, p) == []
+
+    def test_guard_can_be_disabled(self):
+        k = [self._structured("kalshi", "K1", "Will the Chargers beat the Titans?")]
+        p = [self._structured("polymarket_us", "P1", "Will the Chargers beat the Titans?")]
+        assert len(RuleBasedMatcher().match(k, p, skip_structured=False)) == 1
+
+
 class TestWriteMatches:
     def test_writes_expected_json(self, tmp_path):
         c = MatchCandidate(

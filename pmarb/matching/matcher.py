@@ -94,8 +94,27 @@ class RuleBasedMatcher:
         self.max_block_df = max_block_df
 
     def match(
-        self, kalshi_markets: list[Market], poly_markets: list[Market]
+        self,
+        kalshi_markets: list[Market],
+        poly_markets: list[Market],
+        skip_structured: bool = True,
     ) -> list[MatchCandidate]:
+        # Multi-outcome guard: markets carrying structured identity (a game or an
+        # entity-outright) are the structured/futures matchers' job. They are
+        # members of multi-outcome sets ("LeBron's next team", "Round N leader"),
+        # so fuzzy TEXT matching them produces wrong-outcome noise — a Round-1
+        # market matching a Round-2 market, a next-team destination matching a
+        # different destination. Verified: ~95% of structured-id lexical matches
+        # are exactly this noise. So lexical runs ONLY on the genuinely
+        # unstructured universe (event is None and futures is None on both sides).
+        if skip_structured:
+            kalshi_markets = [
+                m for m in kalshi_markets if m.event is None and m.futures is None
+            ]
+            poly_markets = [
+                m for m in poly_markets if m.event is None and m.futures is None
+            ]
+
         # Each poly market has one or more text representations (question + any
         # aliases); we tokenize each and score against all of them, taking the
         # best. This lets futures markets match on their description-derived
