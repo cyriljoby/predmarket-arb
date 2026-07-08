@@ -27,8 +27,10 @@ MAX_LEG_STALENESS_SECONDS = 2.0
 POLL_INTERVAL_SECONDS = 30       # fallback polling interval if a WebSocket drops
 
 # Output Paths
-LOG_PATH = "opportunities.jsonl"
+LOG_PATH = "opportunities.jsonl"              # append-only event log (backtest)
+LATEST_LOG_PATH = "opportunities_latest.jsonl"  # keyed snapshot, one line per open pair
 MATCH_LOG_PATH = "matches.json"
+LOG_HEARTBEAT_SECONDS = 30    # append a per-pair sample at most this often (bounds log size)
 
 # Fees
 # Kalshi taker fee = KALSHI_FEE_COEFFICIENT * price * (1 - price) per contract.
