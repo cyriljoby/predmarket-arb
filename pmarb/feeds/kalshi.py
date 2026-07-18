@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import websockets
 
+from pmarb.config import RECONNECT_BASE_SECONDS, RECONNECT_MAX_SECONDS
 from pmarb.credentials import KalshiCredentials
 from pmarb.feeds._util import is_entity as _is_entity
 from pmarb.feeds._util import now_utc as _now_utc
@@ -332,6 +333,7 @@ class KalshiFeed:
         }
         tickers = list(meta)
 
+        backoff = RECONNECT_BASE_SECONDS
         while True:
             # books: ticker -> {"yes": {price_str: size}, "no": {price_str: size}}
             books: dict[str, dict[str, dict[str, float]]] = {}
@@ -349,6 +351,7 @@ class KalshiFeed:
                         },
                     }))
                     async for raw in ws:
+                        backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
                         msg = json.loads(raw)
                         typ = msg.get("type")
                         if typ not in ("orderbook_snapshot", "orderbook_delta"):
@@ -386,7 +389,10 @@ class KalshiFeed:
                         base = meta[ticker]
                         mk = normalize_orderbook(base.raw["market"], ob, _now_utc())
                         yield replace(mk, event=base.event, futures=base.futures)
-            except websockets.ConnectionClosed:
+            # ConnectionClosed = clean/keepalive drop; OSError = network/DNS/reset;
+            # TimeoutError = a stalled connect/recv. All are recoverable.
+            except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError):
                 if not reconnect:
                     raise
-                await asyncio.sleep(1.0)  # brief backoff, then reconnect + resubscribe
+                await asyncio.sleep(backoff)  # capped exponential backoff
+                backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)

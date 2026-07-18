@@ -16,11 +16,16 @@ import asyncio
 import json
 import sys
 import time
+import traceback
 from collections import defaultdict
 
 import aiohttp
 
-from pmarb.config import MATCH_LOG_PATH
+from pmarb.config import (
+    MATCH_LOG_PATH,
+    RECONNECT_BASE_SECONDS,
+    RECONNECT_MAX_SECONDS,
+)
 from pmarb.credentials import KalshiCredentials, PolymarketUSCredentials
 from pmarb.detection.spread import evaluate_pair
 from pmarb.feeds._util import now_utc
@@ -31,6 +36,24 @@ from pmarb.oplog import LatestOpportunityLog, OpportunityLogger
 
 # Only stream the trustworthy tiers — lexical is noise (see multi-outcome guard).
 _TRUSTED = {"structured", "futures"}
+
+
+async def _fetch_with_retry(feed, attempts: int = 8):
+    """Startup market discovery over REST — retry transient network failures
+    (connection resets, DNS blips, gateway 5xx) so a blip at launch doesn't
+    kill an unattended run."""
+    backoff = RECONNECT_BASE_SECONDS
+    for attempt in range(1, attempts + 1):
+        try:
+            return await feed.fetch_markets()
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:
+            if attempt == attempts:
+                raise
+            print(f"  {feed.platform} fetch_markets failed "
+                  f"({type(exc).__name__}: {exc}); retry in {backoff:.0f}s "
+                  f"[{attempt}/{attempts}]")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)
 
 
 async def run(duration: float | None) -> None:
@@ -55,7 +78,7 @@ async def run(duration: float | None) -> None:
         kfeed = KalshiFeed(session, kcreds)
         pfeed = PolymarketUSFeed(session, pcreds)
         k_all, p_all = await asyncio.gather(
-            kfeed.fetch_markets(), pfeed.fetch_markets()
+            _fetch_with_retry(kfeed), _fetch_with_retry(pfeed)
         )
         k_mkts = [m for m in k_all if m.id in need_k]
         p_mkts = [m for m in p_all if m.id in need_p]
@@ -71,6 +94,25 @@ async def run(duration: float | None) -> None:
         stats = {"updates": 0, "windows": 0}
 
         async def consume(feed, mkts) -> None:
+            # The feed's own reconnect loop handles network drops; this outer
+            # loop is the last line of defense against everything else (a
+            # malformed message, a normalize bug) — log it, back off, restart
+            # the stream. An unattended multi-day run must not die silently.
+            backoff = RECONNECT_BASE_SECONDS
+            while True:
+                try:
+                    await _consume_stream(feed, mkts)
+                    return  # stream ended cleanly (finite market list closed)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    print(f"  {feed.platform} consumer crashed; "
+                          f"restarting in {backoff:.0f}s")
+                    traceback.print_exc()
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)
+
+        async def _consume_stream(feed, mkts) -> None:
             async for mk in feed.stream_books(mkts):
                 cache[mk.id] = mk
                 stats["updates"] += 1

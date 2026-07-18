@@ -25,6 +25,8 @@ MAX_LEG_STALENESS_SECONDS = 2.0
 
 # Runtime
 POLL_INTERVAL_SECONDS = 30       # fallback polling interval if a WebSocket drops
+RECONNECT_BASE_SECONDS = 1.0     # WS reconnect backoff start (doubles per failure)
+RECONNECT_MAX_SECONDS = 30.0     # WS reconnect backoff cap
 
 # Output Paths
 LOG_PATH = "opportunities.jsonl"              # append-only event log (backtest)

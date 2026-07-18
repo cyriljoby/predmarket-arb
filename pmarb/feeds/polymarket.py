@@ -22,6 +22,7 @@ from typing import AsyncIterator
 import aiohttp
 import websockets
 
+from pmarb.config import RECONNECT_BASE_SECONDS, RECONNECT_MAX_SECONDS
 from pmarb.credentials import PolymarketUSCredentials
 from pmarb.feeds._util import is_entity, now_utc, parse_iso_dt
 from pmarb.feeds.auth import polymarket_us_headers
@@ -310,6 +311,7 @@ class PolymarketUSFeed:
         }
         slugs = list(meta_by_slug)
 
+        backoff = RECONNECT_BASE_SECONDS
         while True:
             headers = {
                 **polymarket_us_headers(self._creds, "GET", _WS_PATH),
@@ -326,13 +328,17 @@ class PolymarketUSFeed:
                             "marketSlugs": slugs[i:i + self._SUB_BATCH],
                         }}))
                     async for raw in ws:
+                        backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
                         md = json.loads(raw).get("marketData")
                         slug = md.get("marketSlug") if md else None
                         if slug in meta_by_slug:
                             yield normalize_market_data(
                                 meta_by_slug[slug], md, now_utc()
                             )
-            except websockets.ConnectionClosed:
+            # ConnectionClosed = clean/keepalive drop; OSError = network/DNS/reset;
+            # TimeoutError = a stalled connect/recv. All are recoverable.
+            except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError):
                 if not reconnect:
                     raise
-                await asyncio.sleep(1.0)  # brief backoff, then reconnect+resubscribe
+                await asyncio.sleep(backoff)  # capped exponential backoff
+                backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)
