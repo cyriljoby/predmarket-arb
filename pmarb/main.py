@@ -146,11 +146,13 @@ async def run(duration: float | None) -> None:
                     tmono = time.monotonic()
                     last_t, last_edge = last_append.get(key, (0.0, None))
                     edge = round(ev.raw_spread_top_of_book, 4)
-                    # Sample a live game (structured) or any viable pair, but only
-                    # when the edge actually CHANGED and the heartbeat elapsed —
-                    # quiet games log once then go silent; live games track moves.
-                    if ((is_structured or is_viable)
-                            and edge != last_edge
+                    # Sample a live game (structured) or any viable pair on the
+                    # heartbeat. Games additionally require the edge to have
+                    # CHANGED (quiet games log once then go silent); viable pairs
+                    # log every heartbeat even when static — an open window on a
+                    # sleepy futures book must keep sampling or its duration is
+                    # unmeasurable (it would look like a single-row blip).
+                    if ((is_viable or (is_structured and edge != last_edge))
                             and tmono - last_t >= LOG_HEARTBEAT_SECONDS):
                         event_log.log(ev, match)
                         last_append[key] = (tmono, edge)
