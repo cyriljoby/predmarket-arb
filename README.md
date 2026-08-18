@@ -13,9 +13,9 @@ measurement, not a trading system.
 
 ## Headline
 
-> Over **30 days** of continuous streaming (2026-07-18 → 2026-08-17), **699**
+> Over **30 days** of continuous streaming (2026-07-18 → 2026-08-17), **706**
 > cross-venue matched pairs were monitored on live books — 96.9M book updates,
-> ~2,040 simultaneous books. **38.6%** of those pairs showed at least one
+> ~2,040 simultaneous books. **38.2%** of those pairs showed at least one
 > fee-adjusted-positive window. After removing pairs that fail resolution
 > review, **~31%** is a defensible upper bound on pairs that ever showed real
 > hedgeable arb.
@@ -85,14 +85,14 @@ detector prices the hedge at a single contract, where the depth-walked fill
 price *is* the top of book, so `raw_spread_depth_adjusted == raw_spread_top_of_book`
 by construction. Read A→B as "no attrition by construction," never as
 "slippage is free." Its real cost appears at C, in `estimated_fillable_size`:
-average top-of-book spread **5.31¢** → average depth-adjusted **4.19¢** on the
+average top-of-book spread **5.32¢** → average depth-adjusted **4.21¢** on the
 same samples.
 
 ### 4. Fees
 
 Both venues charge `θ·p·(1−p)` per contract (Kalshi θ=0.07, Poly US taker
 θ=0.05), peaking at $0.50. Combined with the 1¢ slippage buffer the detector
-requires, the measured **break-even spread is 3.18¢/share** — against an average
+requires, the measured **break-even spread is 3.19¢/share** — against an average
 fee-adjusted spread on viable windows of 3.10¢. The opportunity and the cost of
 taking it are the same size.
 
@@ -100,14 +100,14 @@ taking it are the same size.
 
 ## The funnel
 
-Over all 699 tracked pairs, unconditional on review label:
+Over all 706 tracked pairs, unconditional on review label:
 
 | scope | tracked | in log | A: top-of-book spread | B: after slippage | C: after fees |
 |---|---|---|---|---|---|
-| overall | 699 | 387 | 51.9% | 51.9% | 38.6% |
-| structured (games) | 195 | 195 | 87.7% | 87.7% | 40.0% |
+| overall | 706 | 394 | 52.4% | 52.4% | 38.2% |
+| structured (games) | 202 | 202 | 88.1% | 88.1% | 38.6% |
 | futures (outrights) | 504 | 192 | 38.1%\* | 38.1%\* | 38.1% |
-| excluding reviewed-diverged | 653 | 349 | 49.8% | 49.8% | 36.1% |
+| excluding reviewed-diverged | 660 | 356 | 50.3% | 50.3% | 35.8% |
 
 \* **Futures A/B are floors, not measurements.** The live driver only appends a
 futures sample once the pair is already viable, so a futures pair that had a
@@ -157,11 +157,24 @@ point of view, so the other side could be claimed twice — the Kalshi green
 jersey market and the Kalshi overall-winner market both claiming Poly's overall
 Tour de France winner (1.0 vs 0.6667). The loser is a phantom hedge, and phantoms
 produced most of the >20¢ "arb" in the first analysis. `dedupe_one_to_one`
-reduces each layer to a strict 1:1 assignment, refusing rather than guessing on
-exact ties (ambiguous doubleheader legs). This retracted **185 of 1,138 pairs
-(16%)** — 168 green-jersey phantoms and 14 doubleheader ambiguities — and the
-backtest drops any log sample on a retracted pair from every numerator *and*
-denominator (5,578 samples across 29 pairs).
+reduces each layer to a strict 1:1 assignment. Equal scores fall back to the
+smaller resolution-date delta before anything is refused — the two Poly slugs of
+an MLB series score identically but sit a day apart, and the one whose date
+matches the Kalshi ticker is the right game. Only when score *and* delta both
+tie is the contention genuine, and then every contender is dropped rather than
+guessed at.
+
+This retracted **178 of 1,138 pairs (16%)**, and every retraction is
+attributable:
+
+| reason | pairs | what they were |
+|---|---|---|
+| lost on score | 168 | green-jersey phantoms beaten by the correct overall-winner pair at a 0.28–0.33 gap |
+| lost on date delta | 7 | the wrong-day slug of an MLB series, beaten by the slug matching the Kalshi ticker |
+| refused as ambiguous | 3 | Central, Eastern and Western Michigan all claiming one Poly market — none correct |
+
+The backtest drops any log sample on a retracted pair from every numerator *and*
+denominator (3,891 samples across 22 pairs).
 
 **Honest denominators.** C% is over all *tracked* pairs (the keyed snapshot,
 one line per monitored pair), not over the append log, whose futures throttling
@@ -194,6 +207,6 @@ tandem depth walk and `pmarb/matching/futures.py` for the outright matcher.
 - Not evidence that Phase 2 would be profitable. The persistence data argues the
   opposite at retail latency.
 - The 18.3% resolution-divergence rate is a point estimate from a 60-pair
-  sample, not a census; 83.8% of candidate pairs remain unreviewed.
+  sample, not a census; 84.0% of candidate pairs remain unreviewed.
 - Execution risk (leg 1 fills, leg 2 moves) is not modeled anywhere in Phase 1
   and would only subtract from these numbers.

@@ -130,14 +130,14 @@ class TestWriteMatches:
         assert data[0]["similarity_score"] == 0.88
 
 
-def _cand(k, p, score, method="futures"):
+def _cand(k, p, score, method="futures", delta=0):
     return MatchCandidate(
         kalshi_id=k,
         polymarket_id=p,
         kalshi_question=k,
         polymarket_question=p,
         similarity_score=score,
-        resolution_date_delta_days=0,
+        resolution_date_delta_days=delta,
         match_method=method,
     )
 
@@ -152,12 +152,32 @@ def test_dedupe_drops_lower_scoring_claim_on_same_poly_market():
 
 
 def test_dedupe_refuses_equal_score_contention():
-    # The doubleheader: two Poly slugs claim one Kalshi game at the same score.
+    # Same score AND same date delta: genuinely indistinguishable, refuse both.
     kept = dedupe_one_to_one([
         _cand("k:game", "p:jul21", 0.85),
         _cand("k:game", "p:jul22", 0.85),
     ])
     assert kept == []
+
+
+def test_dedupe_breaks_score_tie_on_resolution_date_delta():
+    # The MLB series case: two Poly slugs one day apart claim one Kalshi game
+    # at the same score. The nearer resolution date is the right game.
+    kept = dedupe_one_to_one([
+        _cand("k:game", "p:jul22", 0.85, delta=12),
+        _cand("k:game", "p:jul21", 0.85, delta=11),
+    ])
+    assert [c.polymarket_id for c in kept] == ["p:jul21"]
+
+
+def test_dedupe_treats_unknown_delta_as_worst():
+    # -1 is the matchers' "no resolution date" sentinel; it must not sort ahead
+    # of a real 5-day delta just because it is numerically smaller.
+    kept = dedupe_one_to_one([
+        _cand("k:game", "p:unknown", 0.85, delta=-1),
+        _cand("k:game", "p:known", 0.85, delta=5),
+    ])
+    assert [c.polymarket_id for c in kept] == ["p:known"]
 
 
 def test_dedupe_keeps_independent_pairs():

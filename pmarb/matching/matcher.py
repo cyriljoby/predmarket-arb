@@ -184,6 +184,16 @@ def write_matches(
         json.dump([asdict(c) for c in candidates], f, indent=2)
 
 
+def _delta_rank(c: MatchCandidate) -> int:
+    """Sort key for resolution-date proximity: smaller is better.
+
+    A negative delta is the matchers' "date unknown" sentinel, which must lose
+    to any real measurement rather than sort ahead of a 0-day match.
+    """
+    d = c.resolution_date_delta_days
+    return d if d >= 0 else 1 << 30
+
+
 def dedupe_one_to_one(
     candidates: list[MatchCandidate],
     claimed_kalshi: set[str] | None = None,
@@ -200,9 +210,12 @@ def dedupe_one_to_one(
 
     Resolution: walk candidates best-score-first, letting each pair claim both
     its markets; a pair whose Kalshi or Poly market is already claimed is
-    dropped. Ties are NOT broken arbitrarily — when two or more pairs at the
-    SAME score contend for one market, every contender for that market is
-    dropped, matching the matchers' existing refuse-to-guess rule.
+    dropped. Equal scores fall back to the smaller resolution-date delta before
+    anything is refused — the two Poly slugs of a doubleheader score identically
+    but sit one day apart, and the one whose date matches the Kalshi ticker is
+    the right game. Only when score AND delta both tie is the contention
+    genuine, and then every contender for that market is dropped, matching the
+    matchers' existing refuse-to-guess rule.
 
     `claimed_kalshi` / `claimed_poly` seed the claim sets with markets a
     higher-priority layer already took; both are mutated in place so callers can
@@ -211,22 +224,26 @@ def dedupe_one_to_one(
     k_claimed = claimed_kalshi if claimed_kalshi is not None else set()
     p_claimed = claimed_poly if claimed_poly is not None else set()
 
-    # Deterministic order: score desc, then ids — never leave the winner of a
-    # near-tie up to input ordering.
+    # Deterministic order: score desc, date delta asc, then ids — never leave
+    # the winner of a near-tie up to input ordering.
     ordered = sorted(
         candidates,
-        key=lambda c: (-c.similarity_score, c.kalshi_id, c.polymarket_id),
+        key=lambda c: (-c.similarity_score, _delta_rank(c),
+                       c.kalshi_id, c.polymarket_id),
     )
+
+    def _same_rank(a: MatchCandidate, b: MatchCandidate) -> bool:
+        return (abs(a.similarity_score - b.similarity_score) <= _TIE_MARGIN
+                and _delta_rank(a) == _delta_rank(b))
 
     kept: list[MatchCandidate] = []
     i = 0
     while i < len(ordered):
-        # Collect the full block of candidates sharing this score — ambiguity is
-        # only refused *within* a score block; a lower score is a clean loss.
+        # Collect the full block of candidates sharing this (score, delta) —
+        # ambiguity is only refused *within* a block; ranking lower on either
+        # key is a clean loss.
         j = i + 1
-        while (j < len(ordered)
-               and abs(ordered[j].similarity_score
-                       - ordered[i].similarity_score) <= _TIE_MARGIN):
+        while j < len(ordered) and _same_rank(ordered[j], ordered[i]):
             j += 1
         block = [
             c for c in ordered[i:j]
@@ -246,7 +263,7 @@ def dedupe_one_to_one(
             if c.kalshi_id in contested_k or c.polymarket_id in contested_p:
                 continue  # ambiguous at equal score — refuse to guess
             if c.kalshi_id in k_claimed or c.polymarket_id in p_claimed:
-                continue  # taken by an earlier (higher-scoring) pair in this block
+                continue  # taken by an earlier, better-ranked pair in this block
             k_claimed.add(c.kalshi_id)
             p_claimed.add(c.polymarket_id)
             kept.append(c)
