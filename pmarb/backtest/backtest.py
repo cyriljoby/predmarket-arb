@@ -5,7 +5,7 @@ Answers "does this arb actually exist at retail scale": of the apparent
 much survives fees too. Reads only fields that exist in the log; the single
 viability gate is `fee_adjusted_spread` (> 0 AND estimated_fillable_size > 0).
 
-Run: .venv/bin/python -m pmarb.backtest.backtest [opportunities.jsonl]
+Run: .venv/bin/python -m pmarb.backtest.backtest [LOG] [MATCHES] [LATEST]
 Writes backtest_report.json next to the log.
 """
 
@@ -102,81 +102,175 @@ def run_backtest(log_path: str = LOG_PATH,
         matches = json.load(open(match_path))
     except FileNotFoundError:
         matches = []
-    n_cand = len(matches)
-    n_true = sum(1 for m in matches if m.get("resolution_match") is True)
-    n_false = sum(1 for m in matches if m.get("resolution_match") is False)
-    n_null = n_cand - n_true - n_false
 
-    # --- A/B/C funnel over logged pairs ------------------------------------ #
-    # Spec: computed over TRUE resolution matches only. While review hasn't
-    # happened yet (all null), fall back to all logged pairs and say so —
-    # numbers are then an upper bound on the real funnel.
+    # The collector streams whatever match set existed when it launched; the
+    # match file is the current, corrected one. A pair the matcher has since
+    # retracted (a phantom that shared a market with a better hedge, an
+    # ambiguous doubleheader leg) was never a hedge, so its samples must not
+    # count in any numerator OR denominator.
+    if matches:
+        valid = {(m["kalshi_id"], m["polymarket_id"]) for m in matches}
+        kept_rows = [r for r in rows if _pair(r) in valid]
+        retracted_rows = len(rows) - len(kept_rows)
+        retracted_pairs = len({_pair(r) for r in rows} - valid)
+        rows = kept_rows
+        tracked &= valid
+        if not rows:
+            raise SystemExit(
+                f"no sample in {log_path} survives the match set in {match_path}")
+    else:
+        retracted_rows = retracted_pairs = 0
+    n_cand = len(matches)
     labels = {(m["kalshi_id"], m["polymarket_id"]): m.get("resolution_match")
               for m in matches}
-    reviewed = any(v is not None for v in labels.values())
     for r in rows:  # log rows carry the label as of log time; use current labels
         r["resolution_match"] = labels.get(_pair(r), r.get("resolution_match"))
-    in_scope = [r for r in rows
-                if not reviewed or labels.get(_pair(r)) is True]
 
-    pairs = defaultdict(list)
-    for r in in_scope:
-        pairs[_pair(r)].append(r)
+    # Two review cohorts, reported SEPARATELY because they answer different
+    # questions and only one of them is an unbiased estimator:
+    #   - unbiased-tracked: a seeded random sample of monitored pairs, drawn
+    #     WITHOUT looking at whether the pair ever showed an edge. This is the
+    #     population true-match rate.
+    #   - detector-flagged: every pair the detector called viable. Selected ON
+    #     the outcome, so it measures the SIGNAL'S PRECISION, not the population.
+    # Pooling them would launder the selection bias, so they never mix.
+    cohorts = {}
+    for name in ("unbiased-tracked", "detector-flagged"):
+        c = [m for m in matches
+             if str(m.get("review_sample", "")).startswith(name)]
+        t = sum(1 for m in c if m.get("resolution_match") is True)
+        f = sum(1 for m in c if m.get("resolution_match") is False)
+        cohorts[name] = {
+            "reviewed": t + f,
+            "true": t,
+            "diverged": f,
+            "true_pct": _pct(t, t + f),
+            "diverged_pct": _pct(f, t + f),
+            # Pairs pulled into the cohort but with no resolution text captured.
+            "unreviewable": len(c) - t - f,
+        }
 
-    a_pairs = {p for p, rs in pairs.items()
-               if any(r["raw_spread_top_of_book"] > 0 for r in rs)}
-    b_pairs = {p for p, rs in pairs.items()
-               if any(r["raw_spread_depth_adjusted"] > 0 for r in rs)}
-    c_pairs = {p for p, rs in pairs.items() if any(_viable(r) for r in rs)}
-    n_pairs = len(pairs)
+    # --- A -> B -> C funnel over EVERY tracked pair ------------------------ #
+    # Unconditional on the review label: the label rate is applied once, at the
+    # headline, from the unbiased cohort. Conditioning the funnel on
+    # `resolution_match is True` would restrict it to reviewed pairs, and the
+    # bulk of those were reviewed BECAUSE they went viable — that is what made
+    # the old report print A=B=C=100%.
+    by_pair = defaultdict(list)
+    for r in rows:
+        by_pair[_pair(r)].append(r)
+    tracked |= set(by_pair)
+    method = {(m["kalshi_id"], m["polymarket_id"]): m.get("match_method")
+              for m in matches}
+
+    def _funnel(pairs: set) -> dict:
+        a = sum(1 for p in pairs
+                if any(r["raw_spread_top_of_book"] > 0 for r in by_pair.get(p, ())))
+        b = sum(1 for p in pairs
+                if any(r["raw_spread_depth_adjusted"] > 0 for r in by_pair.get(p, ())))
+        c = sum(1 for p in pairs
+                if any(_viable(r) for r in by_pair.get(p, ())))
+        return {
+            "tracked": len(pairs),
+            "sampled_in_log": sum(1 for p in pairs if p in by_pair),
+            "A_raw_top_of_book_spread_pct": _pct(a, len(pairs)),
+            "B_spread_after_slippage_pct": _pct(b, len(pairs)),
+            "C_viable_after_fees_pct": _pct(c, len(pairs)),
+            "C_pairs": c,
+        }
+
+    structured_pairs = {p for p in tracked if method.get(p) == "structured"}
+    futures_pairs = {p for p in tracked if method.get(p) == "futures"}
+    # Dropping pairs REVIEWED AS DIVERGED is not the selection bias the old
+    # report had: divergence was decided from the two venues' rules text, never
+    # from whether the pair showed an edge. Unreviewed pairs stay in, so this is
+    # still an upper bound — just one with the known-bad hedges taken out.
+    clean_pairs = {p for p in tracked if labels.get(p) is not False}
+    funnel = {
+        "scope": "all tracked pairs, unconditional on review label",
+        "overall": _funnel(tracked),
+        "structured": _funnel(structured_pairs),
+        "futures": _funnel(futures_pairs),
+        "excluding_reviewed_diverged": _funnel(clean_pairs),
+        "caveats": [
+            # Both are properties of the collector, not of the market.
+            "futures A/B are floors, not measurements: the live driver only "
+            "appends a futures sample when the pair is already viable, so a "
+            "futures pair that had a positive top-of-book edge which never "
+            "cleared fees leaves no row. Structured pairs are sampled on every "
+            "edge change, so their A/B/C are honest.",
+            "A and B coincide whenever a pair never clears the fee gate: "
+            "evaluate_pair then prices the hedge at a single contract, where "
+            "the depth-walked fill IS the top of book. Slippage therefore does "
+            "not show up as pairs lost between A and B — it shows up as size "
+            "lost at C. Read the A->B step as 'no attrition by construction', "
+            "not as 'slippage is free'.",
+        ],
+    }
 
     # --- economics on viable samples --------------------------------------- #
-    viable_rows = [r for r in in_scope if _viable(r)]
+    viable_rows = [r for r in rows if _viable(r)]
     sizes = sorted(r["estimated_fillable_size"] for r in viable_rows)
-    fees = [r["yes_fee_per_share"] + r["no_fee_per_share"] for r in in_scope]
+    fees = [r["yes_fee_per_share"] + r["no_fee_per_share"] for r in rows]
 
     # --- time structure ----------------------------------------------------- #
     times = sorted(datetime.fromisoformat(r["timestamp"]) for r in rows)
     span_h = (times[-1] - times[0]).total_seconds() / 3600 if len(times) > 1 else 0.0
-    windows = _windows(in_scope)
+    windows = _windows(rows)
     durations = sorted(w["duration_seconds"] for w in windows)
+    single = sum(1 for w in windows if w["samples"] == 1)
+
+    # --- headline ----------------------------------------------------------- #
+    # Apparent arb -> real arb. The C% is measured; the resolution haircut is
+    # ESTIMATED by applying the unbiased cohort's true rate, so it is a point
+    # estimate off a 60-pair sample, not a census.
+    ever_viable_pct = funnel["overall"]["C_viable_after_fees_pct"]
+    true_rate = cohorts["unbiased-tracked"]["true_pct"] / 100.0
+    headline = {
+        "tracked_pairs": funnel["overall"]["tracked"],
+        "ever_viable_pct": ever_viable_pct,
+        "resolution_true_rate_pct": cohorts["unbiased-tracked"]["true_pct"],
+        "real_arb_pct": round(ever_viable_pct * true_rate, 1),
+        "median_window_duration_seconds": median(durations) if durations else None,
+        "single_sample_window_pct": _pct(single, len(windows)),
+        "statement": (
+            f"{ever_viable_pct}% of tracked matched pairs showed at least one "
+            f"fee-adjusted-positive window in {round(span_h / 24, 1)} days; "
+            f"applying the {cohorts['unbiased-tracked']['true_pct']}% "
+            f"resolution-match rate from the unbiased sample leaves "
+            f"{round(ever_viable_pct * true_rate, 1)}% as real hedgeable arb — "
+            f"and {_pct(single, len(windows))}% of those windows were a single "
+            f"sample, i.e. gone before a second look."
+        ),
+    }
 
     report = {
         "log_path": log_path,
+        "match_path": match_path,
         "samples": len(rows),
+        "retracted_by_match_set": {
+            "samples": retracted_rows,
+            "pairs": retracted_pairs,
+        },
         "collection_span_hours": round(span_h, 2),
+        "headline": headline,
         "resolution_review": {
             "candidate_matches": n_cand,
-            "true_pct": _pct(n_true, n_cand),
-            "diverged_pct": _pct(n_false, n_cand),
-            "unreviewed_pct": _pct(n_null, n_cand),
+            "unreviewed_pct": _pct(
+                sum(1 for v in labels.values() if v is None), n_cand),
+            "cohorts": cohorts,
         },
-        "funnel_scope": "resolution_match true only" if reviewed
-                        else "ALL logged pairs (nothing reviewed yet — upper bound)",
-        "funnel": {
-            "pairs_logged": n_pairs,
-            "A_raw_top_of_book_spread_pct": _pct(len(a_pairs), n_pairs),
-            "B_spread_after_slippage_pct": _pct(len(b_pairs), n_pairs),
-            "C_viable_after_fees_pct": _pct(len(c_pairs), n_pairs),
-        },
-        # Against every pair the collector monitored (bounded snapshot set) —
-        # the defensible "what fraction of matched markets ever showed real,
-        # resolution-verified arb" number.
-        "of_all_tracked_pairs": {
-            "tracked": len(tracked | set(pairs)),
-            "ever_viable_pct": _pct(len(c_pairs), len(tracked | set(pairs))),
-        },
+        "funnel": funnel,
         "spreads": {
             "avg_raw_top_of_book_when_positive": _avg(
-                [r["raw_spread_top_of_book"] for r in in_scope
+                [r["raw_spread_top_of_book"] for r in rows
                  if r["raw_spread_top_of_book"] > 0]),
             "avg_depth_adjusted_when_positive": _avg(
-                [r["raw_spread_depth_adjusted"] for r in in_scope
+                [r["raw_spread_depth_adjusted"] for r in rows
                  if r["raw_spread_depth_adjusted"] > 0]),
             "avg_fee_adjusted_on_viable": _avg(
                 [r["fee_adjusted_spread"] for r in viable_rows]),
-            "break_even_spread": round(
-                (_avg(fees) or 0.0) + SLIPPAGE_BUFFER, 4),
+            "break_even_spread": round((_avg(fees) or 0.0) + SLIPPAGE_BUFFER, 4),
         },
         "fillable_size_on_viable": {
             "median": median(sizes) if sizes else None,
@@ -187,7 +281,7 @@ def run_backtest(log_path: str = LOG_PATH,
             "count": len(windows),
             "per_hour": round(len(windows) / span_h, 2) if span_h else None,
             "median_duration_seconds": median(durations) if durations else None,
-            "single_sample_windows": sum(1 for w in windows if w["samples"] == 1),
+            "single_sample_windows": single,
             "detail": sorted(windows,
                              key=lambda w: w["best_fee_adjusted_spread"],
                              reverse=True),
@@ -197,20 +291,36 @@ def run_backtest(log_path: str = LOG_PATH,
 
 
 def _print_summary(rep: dict) -> None:
-    rr, fn, sp, wd = (rep["resolution_review"], rep["funnel"],
-                      rep["spreads"], rep["windows"])
+    hl, rr, fn, sp, wd = (rep["headline"], rep["resolution_review"],
+                          rep["funnel"], rep["spreads"], rep["windows"])
     print(f"samples: {rep['samples']} over {rep['collection_span_hours']}h "
-          f"({fn['pairs_logged']} distinct pairs)")
-    print(f"\nresolution review of {rr['candidate_matches']} candidates: "
-          f"{rr['true_pct']}% true / {rr['diverged_pct']}% diverged / "
-          f"{rr['unreviewed_pct']}% unreviewed")
-    print(f"\nfunnel [{rep['funnel_scope']}]:")
-    print(f"  A  raw top-of-book spread : {fn['A_raw_top_of_book_spread_pct']}%")
-    print(f"  B  survives slippage      : {fn['B_spread_after_slippage_pct']}%")
-    print(f"  C  survives fees too      : {fn['C_viable_after_fees_pct']}%")
-    at = rep["of_all_tracked_pairs"]
-    print(f"  of ALL {at['tracked']} tracked pairs, ever viable: "
-          f"{at['ever_viable_pct']}%")
+          f"({fn['overall']['tracked']} tracked pairs)")
+    rt = rep["retracted_by_match_set"]
+    if rt["samples"]:
+        print(f"  (dropped {rt['samples']} samples on {rt['pairs']} pairs the "
+              f"matcher has since retracted)")
+
+    print(f"\nresolution review ({rr['candidate_matches']} candidates, "
+          f"{rr['unreviewed_pct']}% still unreviewed):")
+    for name, c in rr["cohorts"].items():
+        print(f"  {name:17} n={c['reviewed']:<4} "
+              f"{c['true_pct']}% true / {c['diverged_pct']}% diverged"
+              + (f"  ({c['unreviewable']} unreviewable)"
+                 if c["unreviewable"] else ""))
+
+    print(f"\nfunnel [{fn['scope']}]:")
+    print(f"  {'':28} {'tracked':>7} {'logged':>7} {'A':>7} {'B':>7} {'C':>7}")
+    for key in ("overall", "structured", "futures",
+                "excluding_reviewed_diverged"):
+        f = fn[key]
+        note = "*" if key == "futures" else " "
+        print(f"  {key:28} {f['tracked']:>7} {f['sampled_in_log']:>7} "
+              f"{f['A_raw_top_of_book_spread_pct']:>6}%{note}"
+              f"{f['B_spread_after_slippage_pct']:>6}%{note}"
+              f"{f['C_viable_after_fees_pct']:>6}%")
+    print("  * futures A/B are floors — non-viable futures samples are never "
+          "logged (see report caveats)")
+
     print(f"\nspreads: raw={sp['avg_raw_top_of_book_when_positive']} "
           f"post-slippage={sp['avg_depth_adjusted_when_positive']} "
           f"viable-avg={sp['avg_fee_adjusted_on_viable']} "
@@ -220,6 +330,7 @@ def _print_summary(rep: dict) -> None:
     print(f"windows: {wd['count']} ({wd['per_hour']}/h), "
           f"median duration {wd['median_duration_seconds']}s, "
           f"{wd['single_sample_windows']} single-sample")
+
     print("\ntop windows by fee-adjusted spread:")
     for w in wd["detail"][:10]:
         label = {True: "OK", False: "DIVERGED", None: "unreviewed"}[
@@ -227,10 +338,14 @@ def _print_summary(rep: dict) -> None:
         print(f"  ${w['best_fee_adjusted_spread']:.4f} x{w['best_size']:<5} "
               f"{w['duration_seconds']:>6.0f}s [{label}] {w['question'][:52]}")
 
+    print(f"\nHEADLINE: {hl['statement']}")
+
 
 def main() -> None:
     log_path = sys.argv[1] if len(sys.argv) > 1 else LOG_PATH
-    report = run_backtest(log_path)
+    match_path = sys.argv[2] if len(sys.argv) > 2 else MATCH_LOG_PATH
+    latest_path = sys.argv[3] if len(sys.argv) > 3 else LATEST_LOG_PATH
+    report = run_backtest(log_path, match_path, latest_path)
     _print_summary(report)
     with open(REPORT_PATH, "w") as fh:
         json.dump(report, fh, indent=2)

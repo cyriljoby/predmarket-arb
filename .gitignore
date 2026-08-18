@@ -26,3 +26,8 @@ CLAUDE.md
 .DS_Store
 .idea/
 .vscode/
+
+# Collection run logs and one-off backups
+*.log
+*.bak
+matches_prededupe.json

@@ -34,6 +34,8 @@ _STOPWORDS = frozenset(
     "win wins beat".split()
 )
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Scores this close are the same score (float noise) — see `dedupe_one_to_one`.
+_TIE_MARGIN = 1e-9
 
 
 def tokenize(text: str) -> set[str]:
@@ -180,3 +182,74 @@ def write_matches(
     """Write candidates to disk as pretty JSON for manual review."""
     with open(path, "w") as f:
         json.dump([asdict(c) for c in candidates], f, indent=2)
+
+
+def dedupe_one_to_one(
+    candidates: list[MatchCandidate],
+    claimed_kalshi: set[str] | None = None,
+    claimed_poly: set[str] | None = None,
+) -> list[MatchCandidate]:
+    """Reduce a candidate list to a strict 1:1 assignment, refusing ties.
+
+    Each matcher picks the best partner from ONE side's point of view, so the
+    other side can be claimed twice. Futures scans Kalshi->Poly, so the Kalshi
+    green-jersey market and the Kalshi overall-winner market both claim the same
+    Poly overall-winner market (1.0 vs 0.6667) — the loser is a phantom hedge.
+    Structured scans Poly->Kalshi, so the two Poly slugs of a doubleheader both
+    claim one Kalshi game (0.85 vs 0.85) — an ambiguous leg assignment.
+
+    Resolution: walk candidates best-score-first, letting each pair claim both
+    its markets; a pair whose Kalshi or Poly market is already claimed is
+    dropped. Ties are NOT broken arbitrarily — when two or more pairs at the
+    SAME score contend for one market, every contender for that market is
+    dropped, matching the matchers' existing refuse-to-guess rule.
+
+    `claimed_kalshi` / `claimed_poly` seed the claim sets with markets a
+    higher-priority layer already took; both are mutated in place so callers can
+    chain layers (structured, then futures, then lexical).
+    """
+    k_claimed = claimed_kalshi if claimed_kalshi is not None else set()
+    p_claimed = claimed_poly if claimed_poly is not None else set()
+
+    # Deterministic order: score desc, then ids — never leave the winner of a
+    # near-tie up to input ordering.
+    ordered = sorted(
+        candidates,
+        key=lambda c: (-c.similarity_score, c.kalshi_id, c.polymarket_id),
+    )
+
+    kept: list[MatchCandidate] = []
+    i = 0
+    while i < len(ordered):
+        # Collect the full block of candidates sharing this score — ambiguity is
+        # only refused *within* a score block; a lower score is a clean loss.
+        j = i + 1
+        while (j < len(ordered)
+               and abs(ordered[j].similarity_score
+                       - ordered[i].similarity_score) <= _TIE_MARGIN):
+            j += 1
+        block = [
+            c for c in ordered[i:j]
+            if c.kalshi_id not in k_claimed and c.polymarket_id not in p_claimed
+        ]
+        i = j
+
+        contested_k = {
+            c.kalshi_id for c in block
+            if sum(o.kalshi_id == c.kalshi_id for o in block) > 1
+        }
+        contested_p = {
+            c.polymarket_id for c in block
+            if sum(o.polymarket_id == c.polymarket_id for o in block) > 1
+        }
+        for c in block:
+            if c.kalshi_id in contested_k or c.polymarket_id in contested_p:
+                continue  # ambiguous at equal score — refuse to guess
+            if c.kalshi_id in k_claimed or c.polymarket_id in p_claimed:
+                continue  # taken by an earlier (higher-scoring) pair in this block
+            k_claimed.add(c.kalshi_id)
+            p_claimed.add(c.polymarket_id)
+            kept.append(c)
+
+    kept.sort(key=lambda c: c.similarity_score, reverse=True)
+    return kept

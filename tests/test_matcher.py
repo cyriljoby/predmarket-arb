@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pmarb.matching.matcher import (
     MatchCandidate,
     RuleBasedMatcher,
+    dedupe_one_to_one,
     jaccard,
     similarity,
     tokenize,
@@ -127,3 +128,61 @@ class TestWriteMatches:
         assert data[0]["kalshi_id"] == "kalshi:K1"
         assert data[0]["resolution_match"] is None
         assert data[0]["similarity_score"] == 0.88
+
+
+def _cand(k, p, score, method="futures"):
+    return MatchCandidate(
+        kalshi_id=k,
+        polymarket_id=p,
+        kalshi_question=k,
+        polymarket_question=p,
+        similarity_score=score,
+        resolution_date_delta_days=0,
+        match_method=method,
+    )
+
+
+def test_dedupe_drops_lower_scoring_claim_on_same_poly_market():
+    # The green-jersey phantom: two Kalshi markets claim one Poly market.
+    kept = dedupe_one_to_one([
+        _cand("k:overall", "p:tour", 1.0),
+        _cand("k:greenjersey", "p:tour", 0.6667),
+    ])
+    assert [c.kalshi_id for c in kept] == ["k:overall"]
+
+
+def test_dedupe_refuses_equal_score_contention():
+    # The doubleheader: two Poly slugs claim one Kalshi game at the same score.
+    kept = dedupe_one_to_one([
+        _cand("k:game", "p:jul21", 0.85),
+        _cand("k:game", "p:jul22", 0.85),
+    ])
+    assert kept == []
+
+
+def test_dedupe_keeps_independent_pairs():
+    pairs = [_cand(f"k{i}", f"p{i}", 0.9) for i in range(3)]
+    assert len(dedupe_one_to_one(pairs)) == 3
+
+
+def test_dedupe_honors_and_updates_claims_across_layers():
+    k_claimed, p_claimed = {"k:taken"}, set()
+    first = dedupe_one_to_one(
+        [_cand("k:taken", "p:a", 1.0), _cand("k:free", "p:b", 0.9)],
+        k_claimed, p_claimed,
+    )
+    assert [c.kalshi_id for c in first] == ["k:free"]
+    assert k_claimed == {"k:taken", "k:free"} and p_claimed == {"p:b"}
+    # A later layer may not re-claim p:b.
+    assert dedupe_one_to_one([_cand("k:other", "p:b", 1.0)],
+                             k_claimed, p_claimed) == []
+
+
+def test_dedupe_tie_refusal_is_scoped_to_the_tied_market():
+    # k:x is contested at 0.9 (both dropped); an unrelated 0.9 pair survives.
+    kept = dedupe_one_to_one([
+        _cand("k:x", "p:1", 0.9),
+        _cand("k:x", "p:2", 0.9),
+        _cand("k:y", "p:3", 0.9),
+    ])
+    assert [c.kalshi_id for c in kept] == ["k:y"]

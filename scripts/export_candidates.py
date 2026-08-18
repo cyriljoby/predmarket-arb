@@ -18,7 +18,11 @@ from pmarb.credentials import PolymarketUSCredentials
 from pmarb.feeds.kalshi import KalshiFeed
 from pmarb.feeds.polymarket import PolymarketUSFeed
 from pmarb.matching.futures import FuturesMatcher
-from pmarb.matching.matcher import RuleBasedMatcher, write_matches
+from pmarb.matching.matcher import (
+    RuleBasedMatcher,
+    dedupe_one_to_one,
+    write_matches,
+)
 from pmarb.matching.structured import StructuredMatcher
 
 
@@ -35,14 +39,15 @@ async def main() -> None:
     futures = FuturesMatcher().match(kalshi, poly)
     lexical = RuleBasedMatcher().match(kalshi, poly)
 
+    # Each layer is reduced to a strict 1:1 assignment before the next one runs,
+    # and the claim sets carry forward — so a market matched by a more precise
+    # layer can never be re-claimed by a looser one, and neither can a single
+    # market anchor two "hedges" (see `dedupe_one_to_one`).
     candidates: list = []
-    seen: set = set()
+    claimed_k: set = set()
+    claimed_p: set = set()
     for group in (structured, futures, lexical):
-        for c in group:
-            key = (c.kalshi_id, c.polymarket_id)
-            if key not in seen:
-                seen.add(key)
-                candidates.append(c)
+        candidates.extend(dedupe_one_to_one(group, claimed_k, claimed_p))
     write_matches(candidates)  # -> matches.json
 
     by_id = {m.id: m for m in kalshi + poly}
