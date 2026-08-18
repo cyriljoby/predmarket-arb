@@ -1,212 +1,169 @@
 # predmarket-arb
 
-Phase 1 of a cross-venue arbitrage study on regulated prediction markets. It
-streams live order books from **Kalshi** and **Polymarket US**, matches markets
-across the two venues, walks both books in tandem to find the largest hedge that
-still clears fees, and logs every window to disk. Then it replays the log and
-reports how much of the apparent edge was real.
+Cross-venue arbitrage detection for regulated prediction markets. It streams
+live order books from **Kalshi** and **Polymarket US**, matches markets across
+the two venues, walks both books in tandem to find the largest hedge that still
+clears fees, and logs every window to disk for replay.
 
-**No orders are placed. No capital is at risk.** The deliverable is a
+**Phase 1: no orders are placed, no capital is at risk.** The deliverable is a
 measurement, not a trading system.
 
 ---
 
-## Headline
+## Pipeline
 
-> Over **30 days** of continuous streaming (2026-07-18 → 2026-08-17), **706**
-> cross-venue matched pairs were monitored on live books — 96.9M book updates,
-> ~2,040 simultaneous books. **38.2%** of those pairs showed at least one
-> fee-adjusted-positive window. After removing pairs that fail resolution
-> review, **~31%** is a defensible upper bound on pairs that ever showed real
-> hedgeable arb.
->
-> That number does not survive contact with the clock. **86% of windows were a
-> single sample** — gone before the next observation. Of the windows on
-> non-diverged pairs, only **14% persisted 30 seconds**, and the median
-> persisting one was worth **$3.76 gross** (364 shares × 1.03¢) before a single
-> order was routed.
->
-> **The arb exists and is measurable. It is not capturable at retail latency,
-> and at these sizes it would not pay for the infrastructure to chase it.**
+```
+┌─ DISCOVERY ─ offline, re-run when the market catalog moves ──────────────────┐
 
----
+  Kalshi REST ──┐
+                ├──►  scripts/export_candidates.py
+  Poly US REST ─┘        │
+                         ├─ StructuredMatcher   games: league + start time + YES side
+                         ├─ FuturesMatcher      outrights: competition × entity
+                         └─ RuleBasedMatcher    lexical, unstructured markets only
+                                │
+                                ▼  dedupe_one_to_one — per layer, claims carried forward
+                                │
+                          matches.json  ◄──  scripts/dedupe_matches.py
+                          pairs + review lineage    (same 1:1 pass, applied offline
+                                                     to an existing match set)
 
-## Where the edge goes
+┌─ COLLECTION ─ long-running ──────────────────────────────────────────────────┐
 
-Four things stand between "these two prices look different" and "I made money."
-Each was measured separately.
+  Kalshi WS ────┐
+                ├──► pmarb/main.py ── in-memory book cache, ~2,000 books
+  Poly US WS ───┘         │
+                          ▼  on every book update
+                    evaluate_pair()   staleness gate, then tandem depth walk
+                          │
+              ┌───────────┴────────────┐
+              ▼                        ▼
+    opportunities_latest.jsonl   opportunities.jsonl
+    one line per pair, always    the time series, throttled
+    (the honest denominator)     (viable always; games on edge-change)
 
-### 1. Matching error — the largest and most dangerous leak
+┌─ ANALYSIS ───────────────────────────────────────────────────────────────────┐
 
-A matching error is not a missed opportunity, it is a **loss**: you believe you
-are hedged when you hold two independent bets that can both lose.
+    both logs + matches.json ──► pmarb/backtest/backtest.py ──► backtest_report.json
+```
 
-An unbiased random sample of 60 monitored pairs (drawn *without* looking at
-whether the pair ever showed an edge) was reviewed against both venues' actual
-settlement rules: **81.7% true matches, 18.3% diverged.**
-
-The divergences were not string-similarity noise. Every one was a pair that
-*looked* right:
-
-| Divergence | Why it breaks the hedge |
-|---|---|
-| **NPB baseball ties** | NPB games end in ties routinely (12-inning limit). Poly settles a tie at $0.50, Kalshi resolves NO. The "hedge" returns ~$0.50 on ~$1.00 of cost. |
-| **UFC draws / no-contests** | ~1% of bouts. Poly $0.50, Kalshi NO. Same failure. |
-| **NFL preseason ties** | Preseason has no overtime, so ties are live. Kalshi resolves NO; Poly settles "to the winner" with no tie clause at all. |
-| **ITF walkovers** | Not negligible at M15/W35 level. Poly settles a no-start at $0.50; Kalshi requires "a ball has been played" and voids at cost. |
-| **F1 fastest-lap reserve drivers** | Poly keeps the market valid and re-points the driver's name at the substitute. Kalshi names the driver. After a substitution the two legs track *different people*. |
-| **"Next team" deadline drift** | Kalshi: Kawhi Leonard joins Chicago **before Oct 21**. Poly: **before Oct 23**. A signing on Oct 21–22 resolves Kalshi NO and Poly YES. |
-| **Conference vs. national championship** (25 pairs) | Kalshi asks whether a school *qualifies for its conference championship game*; Poly asks whether it *advances to the CFP National Championship*. The futures matcher pairs them on the shared tokens `college/football/championship/game`. |
-
-**The implausible tail of "arb" is almost entirely matcher error.** Of the 1,295
-detected windows above 10¢ fee-adjusted, **1,282 (99%) sit on pairs that
-resolution review labeled diverged.** Hand review, not a price filter, is what
-removes them.
-
-Two artifacts survive review and are worth naming as data-quality, not
-opportunity: a NASCAR pair showing 83¢ (Kalshi at $0.01 post-race while Poly
-still carried a resting $0.85 bid pre-settlement) and an F1 constructors pair
-showing 81¢ at size 1. Both are stale books on markets whose event had ended.
-
-### 2. The vig
-
-Matched pairs sit at a **negative** fee-adjusted spread almost all of the time.
-A representative live MLB pair sampled every 30s held −2¢ to −3¢ for its entire
-observed life, punctuated by one +27¢ print lasting under 34 seconds when one
-venue repriced on a game event and the other had not yet followed. That single
-print is the whole shape of the opportunity: not a persistent spread, a
-**latency dislocation**.
-
-### 3. Slippage
-
-Slippage does not cost you *pairs*, it costs you *size* — which is why the
-A→B step of the funnel shows no attrition. When a pair fails the fee gate the
-detector prices the hedge at a single contract, where the depth-walked fill
-price *is* the top of book, so `raw_spread_depth_adjusted == raw_spread_top_of_book`
-by construction. Read A→B as "no attrition by construction," never as
-"slippage is free." Its real cost appears at C, in `estimated_fillable_size`:
-average top-of-book spread **5.32¢** → average depth-adjusted **4.21¢** on the
-same samples.
-
-### 4. Fees
-
-Both venues charge `θ·p·(1−p)` per contract (Kalshi θ=0.07, Poly US taker
-θ=0.05), peaking at $0.50. Combined with the 1¢ slippage buffer the detector
-requires, the measured **break-even spread is 3.19¢/share** — against an average
-fee-adjusted spread on viable windows of 3.10¢. The opportunity and the cost of
-taking it are the same size.
+There is exactly one path by which order books enter the system — the WebSocket
+feeds. REST is used only to discover which markets exist.
 
 ---
 
-## The funnel
+## Stages
 
-Over all 706 tracked pairs, unconditional on review label:
+### Discovery — three matchers, in priority order
 
-| scope | tracked | in log | A: top-of-book spread | B: after slippage | C: after fees |
-|---|---|---|---|---|---|
-| overall | 706 | 394 | 52.4% | 52.4% | 38.2% |
-| structured (games) | 202 | 202 | 88.1% | 88.1% | 38.6% |
-| futures (outrights) | 504 | 192 | 38.1%\* | 38.1%\* | 38.1% |
-| excluding reviewed-diverged | 660 | 356 | 50.3% | 50.3% | 35.8% |
+A matching error is the most dangerous failure in the system: you believe you
+are hedged when you hold two independent bets that can both lose. So markets are
+paired on **structured identity** wherever both venues encode one, and on text
+only where neither does.
 
-\* **Futures A/B are floors, not measurements.** The live driver only appends a
-futures sample once the pair is already viable, so a futures pair that had a
-positive top-of-book edge which never cleared fees leaves no row in the log.
-Structured pairs are sampled on every edge change, so their A/B/C are honest.
-This is a property of the collector, not of the market, and it is why the
-structured row is the one to trust.
-
-### Persistence — the number that actually decides it
-
-Restricted to windows on non-diverged pairs (8,417 windows across 236 pairs):
-
-| survived | windows | pairs |
+| matcher | handles | keys on |
 |---|---|---|
-| any (≥1 sample) | 8,417 | 236 |
-| ≥ 30s | 1,185 | 109 |
-| ≥ 60s | 861 | 89 |
-| ≥ 5 min | 126 | 33 |
+| `matching/structured.py` | head-to-head games | league, game start time, competitor pair, and which competitor YES pays on |
+| `matching/futures.py` | entity outrights | `(competition, entity)` — with sub-event selectors ("Stage 9", "Round 1") required to match exactly |
+| `matching/matcher.py` | everything unstructured | Jaccard + character ratio over the question text |
 
-Median persisting (≥30s) window: **364 shares at 1.03¢ = $3.76 gross**, before
-routing, before a second leg's price moves, before the two-leg execution risk
-that Phase 1 explicitly does not model.
+Lexical matching is deliberately barred from markets that carry a structured
+identity: those belong to multi-outcome sets, where fuzzy text matching reliably
+pairs the wrong outcome.
 
----
-
-## Methodology notes (what makes these numbers defensible)
-
-**Two review cohorts, never pooled.** An earlier pass reviewed 93 pairs — but
-only pairs the detector had already flagged as viable. Selecting on the outcome
-and then reporting "100% of reviewed matches had an edge" is circular, and the
-first report did exactly that. Those 93 were re-reviewed here on a rules-level
-standard and are reported as a **separate cohort** measuring the *detector's
-precision* (81.9% true, 21 unreviewable for lack of captured rules text). The
-population true-match rate comes only from the seeded unbiased sample. They
-agree closely — resolution divergence is not concentrated in the flagged set —
-but they are different questions and the report keeps them apart.
-
-**Review standard.** `resolution_match: true` means settlement agrees on every
-outcome with non-negligible probability; residual tail asymmetry (on
-cancellation Poly pays last fair market price while Kalshi's captured text is
-silent, expected void at cost) is recorded in `resolution_notes` rather than
-used to fail the pair. Divergence was decided from the two venues' rules text,
-never from whether the pair showed an edge.
-
-**Matcher 1:1 correction.** Each matcher picks the best partner from one side's
-point of view, so the other side could be claimed twice — the Kalshi green
-jersey market and the Kalshi overall-winner market both claiming Poly's overall
-Tour de France winner (1.0 vs 0.6667). The loser is a phantom hedge, and phantoms
-produced most of the >20¢ "arb" in the first analysis. `dedupe_one_to_one`
-reduces each layer to a strict 1:1 assignment. Equal scores fall back to the
-smaller resolution-date delta before anything is refused — the two Poly slugs of
-an MLB series score identically but sit a day apart, and the one whose date
-matches the Kalshi ticker is the right game. Only when score *and* delta both
-tie is the contention genuine, and then every contender is dropped rather than
+Each layer is then reduced to a strict 1:1 assignment by `dedupe_one_to_one`,
+with claims carried forward so a looser layer can never re-claim a market a more
+precise one already took. Contention resolves on score, then on resolution-date
+proximity; only when both tie is the pair refused as ambiguous rather than
 guessed at.
 
-This retracted **178 of 1,138 pairs (16%)**, and every retraction is
-attributable:
+A match means "same event, same side" — **not** "same settlement rules." That
+judgement is human, recorded per pair as review lineage in `matches.json`.
 
-| reason | pairs | what they were |
-|---|---|---|
-| lost on score | 168 | green-jersey phantoms beaten by the correct overall-winner pair at a 0.28–0.33 gap |
-| lost on date delta | 7 | the wrong-day slug of an MLB series, beaten by the slug matching the Kalshi ticker |
-| refused as ambiguous | 3 | Central, Eastern and Western Michigan all claiming one Poly market — none correct |
+### Collection — detection on every book update
 
-The backtest drops any log sample on a retracted pair from every numerator *and*
-denominator (3,891 samples across 22 pairs).
+`pmarb/main.py` holds one WebSocket per venue, keeps every subscribed book in
+memory, and on each update re-evaluates that market's matched partner.
 
-**Honest denominators.** C% is over all *tracked* pairs (the keyed snapshot,
-one line per monitored pair), not over the append log, whose futures throttling
-would inflate it.
+`evaluate_pair()` applies, in order:
+
+1. **Staleness gate** — if either leg's snapshot is older than
+   `MAX_LEG_STALENESS_SECONDS`, discard. A fresh book compared against a stale
+   one is a phantom, not an arb.
+2. **Tandem depth walk** (`max_fillable_size`) — walks both ask ladders in
+   lockstep to find the largest hedge that still clears the viability gate.
+   Slippage is applied first, as depth-walked fill prices; fees are computed on
+   those fill prices, with the Kalshi fee accumulated per level rather than
+   taken on the average (its `0.07·p·(1−p)` is concave, so averaging overstates).
+
+Two sinks, because they answer different questions:
+
+- **`opportunities_latest.jsonl`** — every tracked pair, always, one line each.
+  This is what makes "of all pairs monitored, how many ever went viable" an
+  honest fraction.
+- **`opportunities.jsonl`** — the append-only time series, throttled to bound
+  size. Every viable sample is written; non-viable samples only for live games,
+  and only when the edge changed.
+
+### Analysis — replay
+
+`pmarb/backtest/backtest.py` reads both logs plus the current `matches.json`,
+drops samples belonging to pairs the matcher has since retracted (from every
+numerator *and* denominator), and reports the A → B → C funnel with its caveats
+attached as data rather than as prose someone has to remember.
+
+---
+
+## Results so far
+
+A 30-day continuous run (2026-07-18 → 2026-08-17): 96.9M book updates, ~2,040
+simultaneous books, 706 matched pairs monitored.
+
+| | |
+|---|---|
+| pairs that ever showed a fee-adjusted-positive window | **38.2%** |
+| resolution-match rate, unbiased 60-pair sample | **81.7%** true / 18.3% diverged |
+| windows lasting a single sample | **86%** |
+| median persisting (≥30s) window | 364 shares × 1.03¢ = **$3.76 gross** |
+| break-even spread | 3.19¢/share, against a 3.10¢ average viable spread |
+
+**The arb is real and measurable. It is not capturable at retail latency**, and
+at these sizes it would not pay for the infrastructure to chase it.
+
+Two caveats that matter more than the headline. First, `LOG_HEARTBEAT_SECONDS`
+throttles the append log to 30 seconds, so a window shorter than that yields one
+row and reads as 0s — the "86% single-sample" figure is bounded by the
+instrument, not just the market. Second, 99% of windows above 10¢ sit on pairs
+that resolution review labeled diverged: **the implausible tail of apparent arb
+is matcher error**, and hand review rather than a price filter is what removes it.
 
 ---
 
 ## Running it
 
 ```bash
-python -m pmarb.main [DURATION_SECONDS]          # live collection (Ctrl+C to stop)
-python scripts/export_candidates.py              # rebuild matches.json (dedupes as it matches)
-python scripts/dedupe_matches.py [IN] [OUT]      # apply 1:1 pass to an existing matches.json
+python scripts/verify_auth.py                    # confirm both venues sign correctly
+python scripts/export_candidates.py              # rebuild matches.json
+python -m pmarb.main [DURATION_SECONDS]          # collect (Ctrl+C to stop)
 python -m pmarb.backtest.backtest [LOG] [MATCHES] [LATEST]
-pytest tests                                     # 129 tests
+pytest tests                                     # 131 tests
+ruff check .
 ```
 
-Credentials live in a gitignored `.env` (see `.env.example`); both venues'
-request signing is verified live by `scripts/verify_auth.py`.
+Credentials come from a gitignored `.env`; see `.env.example`. Kalshi signs with
+RSA-PSS, Polymarket US with Ed25519, and `scripts/verify_auth.py` proves both
+against live endpoints.
 
-Architecture, the fee model, the depth-walk contract, and the matcher design are
-documented in module docstrings — start with `pmarb/detection/spread.py` for the
-tandem depth walk and `pmarb/matching/futures.py` for the outright matcher.
+Design detail lives in module docstrings — `detection/spread.py` for the depth
+walk and fee accumulation, `matching/futures.py` and `matching/structured.py`
+for how each identity is extracted from the wire.
 
 ---
 
 ## What this is not
 
 - Not a profitable trading system — Phase 1 places no orders.
-- Not evidence that Phase 2 would be profitable. The persistence data argues the
-  opposite at retail latency.
-- The 18.3% resolution-divergence rate is a point estimate from a 60-pair
-  sample, not a census; 84.0% of candidate pairs remain unreviewed.
-- Execution risk (leg 1 fills, leg 2 moves) is not modeled anywhere in Phase 1
-  and would only subtract from these numbers.
+- Not evidence that live execution would be profitable. The persistence data
+  argues the opposite at retail latency.
+- Execution risk (leg 1 fills, leg 2 moves) is modeled nowhere and would only
+  subtract from these numbers.
