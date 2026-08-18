@@ -259,34 +259,6 @@ class PolymarketUSFeed:
                 break
         return markets
 
-    async def fetch_book(self, market: Market, timeout: float = 15.0) -> Market | None:
-        """One-shot: open the authed WS, subscribe to this market's slug, take the
-        first full snapshot, and normalize it. Returns None if no data arrives.
-
-        (The continuous `stream_books()` generator that keeps one socket open for
-        many slugs is the next build step; this proves the path end to end.)
-        """
-        meta = market.raw["market"]
-        headers = {
-            **polymarket_us_headers(self._creds, "GET", _WS_PATH),
-            "User-Agent": _UA,
-        }
-        async with websockets.connect(_WS_URL, additional_headers=headers) as ws:
-            await ws.send(
-                json.dumps(
-                    {
-                        "subscribe": {
-                            "requestId": "pmarb",
-                            "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
-                            "marketSlugs": [meta["slug"]],
-                        }
-                    }
-                )
-            )
-            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            md = json.loads(raw).get("marketData")
-            return normalize_market_data(meta, md, now_utc()) if md else None
-
     _SUB_BATCH = 200  # max marketSlugs per subscribe message
 
     async def stream_books(

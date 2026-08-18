@@ -299,15 +299,6 @@ class KalshiFeed:
             cursor = next_cursor
         return markets
 
-    async def fetch_orderbook(self, market: Market) -> Market:
-        """Fetch the live order book for a (metadata) Market and return a new
-        full-depth Market snapshot. Kalshi's book endpoint is public (no auth)."""
-        ticker = market.raw["market"]["ticker"]
-        ob = await self._get(f"/markets/{ticker}/orderbook")
-        return normalize_orderbook(
-            market.raw["market"], ob.get("orderbook_fp", {}), _now_utc()
-        )
-
     async def stream_books(
         self, markets: list[Market], *, reconnect: bool = True
     ) -> AsyncIterator[Market]:

@@ -24,7 +24,6 @@ MAX_FILLABLE_CAP = 1000          # hard upper bound on the max_fillable_size sea
 MAX_LEG_STALENESS_SECONDS = 2.0
 
 # Runtime
-POLL_INTERVAL_SECONDS = 30       # fallback polling interval if a WebSocket drops
 RECONNECT_BASE_SECONDS = 1.0     # WS reconnect backoff start (doubles per failure)
 RECONNECT_MAX_SECONDS = 30.0     # WS reconnect backoff cap
 
