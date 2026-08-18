@@ -1,7 +1,7 @@
 """Unit tests for the rule-based matcher."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from pmarb.matching.matcher import (
     MatchCandidate,
@@ -14,7 +14,7 @@ from pmarb.matching.matcher import (
 )
 from pmarb.models import Market
 
-DAY = datetime(2026, 9, 1, tzinfo=timezone.utc)
+DAY = datetime(2026, 9, 1, tzinfo=UTC)
 
 
 def mkt(platform, mid, question, date=DAY):
@@ -96,7 +96,8 @@ class TestMultiOutcomeGuard:
         # Identical text, but both carry structured identity -> lexical refuses
         # (they belong to the futures/structured tiers, not fuzzy text).
         k = [self._structured("kalshi", "K1", "Will the Chargers beat the Titans?")]
-        p = [self._structured("polymarket_us", "P1", "Will the Chargers beat the Titans?")]
+        p = [self._structured("polymarket_us", "P1",
+                              "Will the Chargers beat the Titans?")]
         assert RuleBasedMatcher().match(k, p) == []
 
     def test_still_matches_unstructured(self):
@@ -111,7 +112,8 @@ class TestMultiOutcomeGuard:
 
     def test_guard_can_be_disabled(self):
         k = [self._structured("kalshi", "K1", "Will the Chargers beat the Titans?")]
-        p = [self._structured("polymarket_us", "P1", "Will the Chargers beat the Titans?")]
+        p = [self._structured("polymarket_us", "P1",
+                              "Will the Chargers beat the Titans?")]
         assert len(RuleBasedMatcher().match(k, p, skip_structured=False)) == 1
 
 

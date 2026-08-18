@@ -91,7 +91,8 @@ def run_backtest(log_path: str = LOG_PATH,
     # The append log only samples interesting pairs; the honest "of all pairs
     # monitored, how many ever went viable" denominator is the tracked set.
     try:
-        tracked = {_pair(json.loads(l)) for l in open(latest_path) if l.strip()}
+        tracked = {_pair(json.loads(line))
+                   for line in open(latest_path) if line.strip()}
     except FileNotFoundError:
         tracked = set()
     if not rows:

@@ -1,27 +1,27 @@
 """Tests for evaluate_pair (funnel record) and the opportunity logger."""
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from pmarb.detection.spread import PairEvaluation, evaluate_pair
+from pmarb.models import Market, PriceLevel
 from pmarb.oplog.logger import (
     LatestOpportunityLog,
     OpportunityLogger,
     opportunity_record,
 )
-from pmarb.models import Market, PriceLevel
 
-NOW = datetime(2026, 7, 6, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 6, tzinfo=UTC)
 
 
 def mkt(platform, mid, yes_depth, no_depth):
     return Market(
         id=f"{platform}:{mid}", platform=platform, question="Q",
         resolution_date=NOW, category="", updated_at=NOW,
-        yes_depth=tuple(PriceLevel(*l) for l in yes_depth),
-        no_depth=tuple(PriceLevel(*l) for l in no_depth),
+        yes_depth=tuple(PriceLevel(*lvl) for lvl in yes_depth),
+        no_depth=tuple(PriceLevel(*lvl) for lvl in no_depth),
     )
 
 
@@ -35,7 +35,7 @@ class TestEvaluatePair:
     def test_none_when_stale(self):
         k = mkt("kalshi", "K", [(0.40, 100)], [(0.55, 100)])
         p = mkt("polymarket_us", "P", [(0.40, 100)], [(0.55, 100)])
-        stale = datetime(2026, 7, 6, 0, 0, 30, tzinfo=timezone.utc)  # 30s later
+        stale = datetime(2026, 7, 6, 0, 0, 30, tzinfo=UTC)  # 30s later
         assert evaluate_pair(k, p, stale, max_staleness=2.0) is None
 
     def test_records_apparent_edge_not_fee_viable(self):

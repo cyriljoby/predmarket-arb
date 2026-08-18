@@ -16,8 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import AsyncIterator
 
 import aiohttp
 import websockets
@@ -136,7 +136,8 @@ def _questions(
     raw_q = market.get("question", "")
     if event is not None:
         a, b = event.competitors
-        return f"Will {event.yes_competitor} win {a} vs. {b}?", (raw_q,) if raw_q else ()
+        question = f"Will {event.yes_competitor} win {a} vs. {b}?"
+        return question, (raw_q,) if raw_q else ()
     primary = _match_question(market)
     aliases = (raw_q,) if raw_q and raw_q != primary else ()
     return primary, aliases
@@ -309,7 +310,7 @@ class PolymarketUSFeed:
                             )
             # ConnectionClosed = clean/keepalive drop; OSError = network/DNS/reset;
             # TimeoutError = a stalled connect/recv. All are recoverable.
-            except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError):
+            except (TimeoutError, websockets.ConnectionClosed, OSError):
                 if not reconnect:
                     raise
                 await asyncio.sleep(backoff)  # capped exponential backoff

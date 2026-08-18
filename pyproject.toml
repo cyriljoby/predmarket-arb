@@ -14,10 +14,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.16"]
 
 [tool.setuptools.packages.find]
 include = ["pmarb*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# F  unused imports / names / dead bindings   E,W  pycodestyle
+# I  import ordering                          UP   outdated syntax for py311+
+# B  likely bugs (mutable defaults, ...)      C4   comprehension rewrites
+# RUF unclean asyncio / dataclass patterns
+select = ["F", "E", "W", "I", "UP", "B", "C4", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Feed tests build fakes that must match the real call signatures, so their
+# stubs carry arguments they never read.
+"tests/*" = ["ARG001", "ARG005"]

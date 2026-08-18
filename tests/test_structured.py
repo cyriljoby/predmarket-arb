@@ -4,14 +4,14 @@ Fixtures mirror real wire payloads observed live (2026-07): Kalshi game-series
 tickers/titles and Polymarket US moneyline marketSides.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pmarb.feeds.kalshi import _market_metadata as kalshi_meta
 from pmarb.feeds.kalshi import _parse_event_start
 from pmarb.feeds.polymarket import _market_metadata as poly_meta
 from pmarb.matching.structured import StructuredMatcher, competitor_score
 
-NOW = datetime(2026, 7, 5, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 5, tzinfo=UTC)
 
 
 def kalshi_game_market(
@@ -68,11 +68,11 @@ class TestKalshiEventExtraction:
     def test_start_time_is_eastern_converted_to_utc(self):
         # 26JUL081845 = 2026-07-08 18:45 ET = 22:45 UTC (EDT)
         start = _parse_event_start("26JUL081845HOUWSH")
-        assert start == datetime(2026, 7, 8, 22, 45, tzinfo=timezone.utc)
+        assert start == datetime(2026, 7, 8, 22, 45, tzinfo=UTC)
 
     def test_date_only_segment_parses_to_midnight_eastern(self):
         start = _parse_event_start("26SEP14DALSEA")
-        assert start == datetime(2026, 9, 14, 4, 0, tzinfo=timezone.utc)
+        assert start == datetime(2026, 9, 14, 4, 0, tzinfo=UTC)
 
     def test_non_game_series_has_no_event(self):
         m = kalshi_meta(
@@ -100,7 +100,7 @@ class TestPolyEventExtraction:
         assert m.event.league == "mlb"
         assert m.event.yes_competitor == "Houston Astros"
         assert m.event.yes_abbrev == "hou"
-        assert m.event.start_time == datetime(2026, 7, 8, 22, 45, tzinfo=timezone.utc)
+        assert m.event.start_time == datetime(2026, 7, 8, 22, 45, tzinfo=UTC)
 
     def test_question_synthesized_with_yes_semantics(self):
         m = poly_moneyline()

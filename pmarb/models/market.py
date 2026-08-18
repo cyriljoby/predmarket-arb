@@ -13,8 +13,12 @@ from typing import NamedTuple
 
 @dataclass(frozen=True, slots=True)
 class SportsEvent:
-    """Structured identity for head to head sports events, which are the only markets that can be reliably matched across venues.
-    Allows matcher to algin markets with different phrasings, and detector to know which competitor is YES vs NO.
+    """Structured identity for a head-to-head game.
+
+    Venues phrase moneylines incompatibly — Kalshi writes one market per team,
+    Poly writes "A vs. B" with no YES semantics — so text similarity cannot pair
+    them. Both encode the game in metadata, which is what this captures: enough
+    to align the two listings, and to know which competitor YES pays on.
     """
 
     league: str
@@ -64,27 +68,28 @@ class Market:
     rather than mutating a shared object, which keeps the detector free of
     aliasing bugs across the two async feeds.
 
-    Depth is ASK-side, the cost to buy, sorted best (cheapest) first.
-    `yes_depth` answers "buy YES"; `no_depth` answers "buy NO". This is the only
-    side the arb detector walks (a hedge buys both legs). 
-
-    Ask-side depth (yes_depth/no_depth) is what the system trades on and walks for slippage.
-    At each level: price is how much one share costs there, and size is how many shares are available at that price.
-    
+    Depth is ASK-side — the cost to buy — sorted cheapest first. `yes_depth`
+    answers "buy YES", `no_depth` answers "buy NO", and each level is
+    (price per share, shares available at that price). A hedge buys both legs,
+    so the ask side is the only one the detector walks for slippage.
     """
 
     id: str                              # internal id, e.g. "kalshi:KXELONMARS-99"
     platform: str                        # "kalshi" | "polymarket"
     question: str                        # raw question text (used for matching)
     resolution_date: datetime            # when the market resolves
-    category: str                        # fee-lookup key (Polymarket); informational for Kalshi
+    # Fee-lookup key on Polymarket; informational only on Kalshi, whose fee is
+    # a function of fill price rather than category.
+    category: str
     yes_depth: tuple[PriceLevel, ...]    # ask-side depth to buy YES, cheapest first
     no_depth: tuple[PriceLevel, ...]     # ask-side depth to buy NO, cheapest first
-    updated_at: datetime                 # when THIS snapshot was observed (drives the staleness gate)
-    raw: dict = field(default_factory=dict, repr=False)  # original payload, for debugging
+    updated_at: datetime                 # when THIS snapshot was observed;
+    #                                      drives the staleness gate
+    # Original venue payload, kept for debugging and structured-id extraction.
+    raw: dict = field(default_factory=dict, repr=False)
     yes_bid: float | None = None         # reference only — not used by detection
     no_bid: float | None = None          # reference only — not used by detection
-    match_aliases: tuple[str, ...] = ()  # alt phrasings the matcher also scores against
+    match_aliases: tuple[str, ...] = ()  # alt phrasings the matcher scores too
     # At most ONE is set: a market is a head-to-head game, an entity-outright,
     # or unstructured (both None -> lexical matcher).
     event: SportsEvent | None = None     # head-to-head game (moneyline markets)

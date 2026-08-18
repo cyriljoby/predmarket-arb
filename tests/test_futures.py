@@ -4,7 +4,7 @@ Fixtures mirror real wire payloads (2026-07): Kalshi outright event/market
 shapes and Polymarket US futures title/question fields.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pmarb.feeds.kalshi import _market_metadata as kalshi_meta
 from pmarb.feeds.polymarket import _market_metadata as poly_meta
@@ -14,7 +14,7 @@ from pmarb.matching.futures import (
     competition_tokens,
 )
 
-NOW = datetime(2026, 7, 5, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 5, tzinfo=UTC)
 
 
 def kalshi_outright(

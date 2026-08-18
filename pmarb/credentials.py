@@ -53,7 +53,7 @@ class KalshiCredentials:
     private_key_pem: str
 
     @classmethod
-    def from_env(cls) -> "KalshiCredentials":
+    def from_env(cls) -> KalshiCredentials:
         key_path = Path(_require("KALSHI_PRIVATE_KEY_PATH")).expanduser()
         return cls(
             key_id=_require("KALSHI_API_KEY_ID"),
@@ -69,7 +69,7 @@ class PolymarketUSCredentials:
     secret_key: str
 
     @classmethod
-    def from_env(cls) -> "PolymarketUSCredentials":
+    def from_env(cls) -> PolymarketUSCredentials:
         return cls(
             key_id=_require("POLYMARKET_US_KEY_ID"),
             secret_key=_require("POLYMARKET_US_SECRET_KEY"),

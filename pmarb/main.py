@@ -22,6 +22,8 @@ from collections import defaultdict
 import aiohttp
 
 from pmarb.config import (
+    LATEST_LOG_PATH,
+    LOG_HEARTBEAT_SECONDS,
     MATCH_LOG_PATH,
     RECONNECT_BASE_SECONDS,
     RECONNECT_MAX_SECONDS,
@@ -31,7 +33,6 @@ from pmarb.detection.spread import evaluate_pair
 from pmarb.feeds._util import now_utc
 from pmarb.feeds.kalshi import KalshiFeed
 from pmarb.feeds.polymarket import PolymarketUSFeed
-from pmarb.config import LATEST_LOG_PATH, LOG_HEARTBEAT_SECONDS
 from pmarb.oplog import LatestOpportunityLog, OpportunityLogger
 
 # Only stream the trustworthy tiers — lexical is noise (see multi-outcome guard).
@@ -46,7 +47,7 @@ async def _fetch_with_retry(feed, attempts: int = 8):
     for attempt in range(1, attempts + 1):
         try:
             return await feed.fetch_markets()
-        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError, OSError) as exc:
             if attempt == attempts:
                 raise
             print(f"  {feed.platform} fetch_markets failed "
@@ -89,7 +90,9 @@ async def run(duration: float | None) -> None:
         # Two sinks: an append-only event log (time series -> backtest) and a
         # keyed latest-snapshot (one line per pair -> live "what's open now").
         event_log = OpportunityLogger()            # opportunities.jsonl
-        latest_log = LatestOpportunityLog(LATEST_LOG_PATH, flush_interval=2.0)  # snapshot
+        latest_log = LatestOpportunityLog(  # keyed snapshot
+            LATEST_LOG_PATH, flush_interval=2.0
+        )
         last_append: dict[tuple, float] = {}       # per-pair last append-log time
         stats = {"updates": 0, "windows": 0}
 
@@ -177,7 +180,7 @@ async def run(duration: float | None) -> None:
                 await asyncio.wait_for(asyncio.gather(*tasks), timeout=duration)
             else:
                 await asyncio.gather(*tasks)
-        except (asyncio.TimeoutError, KeyboardInterrupt):
+        except (TimeoutError, KeyboardInterrupt):
             pass
         finally:
             for t in tasks:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # An outright's entity must be a proper subject (person/team/place), not a
 # threshold/scalar bucket ("Above 13000", "1+ wins", "below 7.60") or a bare
@@ -33,4 +33,4 @@ def parse_iso_dt(s: str | None) -> datetime | None:
 
 
 def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

@@ -1,6 +1,6 @@
 """Unit tests for the arbitrage detector (pure, no network)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,7 +12,7 @@ from pmarb.detection.spread import (
 from pmarb.fees import kalshi_fee_per_share, poly_us_taker_fee_per_share
 from pmarb.models import Market, PriceLevel
 
-NOW = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 29, 12, 0, 0, tzinfo=UTC)
 
 
 def lvls(*pairs):
@@ -25,7 +25,8 @@ class TestComputeFillPrice:
 
     def test_walks_into_second_level(self):
         # 50 @ 0.40 + 30 @ 0.45 = 33.5 over 80 = 0.41875
-        assert compute_fill_price(lvls((0.40, 50), (0.45, 100)), 80) == pytest.approx(0.41875)
+        got = compute_fill_price(lvls((0.40, 50), (0.45, 100)), 80)
+        assert got == pytest.approx(0.41875)
 
     def test_insufficient_liquidity_is_none(self):
         assert compute_fill_price(lvls((0.40, 50)), 200) is None
@@ -102,11 +103,13 @@ class TestDetectPair:
 
     def test_no_arb_returns_empty(self):
         k = make_market("kalshi", "K1", yes=lvls((0.42, 100)), no=lvls((0.60, 100)))
-        p = make_market("polymarket_us", "P1", yes=lvls((0.60, 100)), no=lvls((0.55, 100)))
+        p = make_market("polymarket_us", "P1",
+                        yes=lvls((0.60, 100)), no=lvls((0.55, 100)))
         assert detect_pair(k, p, NOW) == []
 
     def test_staleness_gate_suppresses(self):
         # Poly leg is 10s old; default staleness tolerance is 2s -> skip entirely.
         k = make_market("kalshi", "K1", yes=lvls((0.40, 100)))
-        p = make_market("polymarket_us", "P1", no=lvls((0.55, 100)), at=NOW - timedelta(seconds=10))
+        p = make_market("polymarket_us", "P1", no=lvls((0.55, 100)),
+                        at=NOW - timedelta(seconds=10))
         assert detect_pair(k, p, NOW) == []

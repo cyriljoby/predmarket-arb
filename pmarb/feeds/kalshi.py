@@ -15,9 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime
-from typing import AsyncIterator
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -359,7 +359,7 @@ class KalshiFeed:
                         book = books.setdefault(ticker, {"yes": {}, "no": {}})
                         if typ == "orderbook_snapshot":
                             book["yes"] = {p: float(s)
-                                           for p, s in (body.get("yes_dollars_fp") or [])}
+                                     for p, s in (body.get("yes_dollars_fp") or [])}
                             book["no"] = {p: float(s)
                                           for p, s in (body.get("no_dollars_fp") or [])}
                         else:  # orderbook_delta
@@ -382,7 +382,7 @@ class KalshiFeed:
                         yield replace(mk, event=base.event, futures=base.futures)
             # ConnectionClosed = clean/keepalive drop; OSError = network/DNS/reset;
             # TimeoutError = a stalled connect/recv. All are recoverable.
-            except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError):
+            except (TimeoutError, websockets.ConnectionClosed, OSError):
                 if not reconnect:
                     raise
                 await asyncio.sleep(backoff)  # capped exponential backoff

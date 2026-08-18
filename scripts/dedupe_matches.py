@@ -18,7 +18,7 @@ from pmarb.matching.matcher import MatchCandidate, dedupe_one_to_one
 
 # Same priority order as the live pipeline: most precise layer claims first.
 _PRIORITY = ("structured", "futures", "lexical")
-_FIELDS = {f for f in MatchCandidate.__dataclass_fields__}
+_FIELDS = set(MatchCandidate.__dataclass_fields__)
 
 
 def main() -> None:

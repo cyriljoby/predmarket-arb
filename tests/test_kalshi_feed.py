@@ -1,12 +1,12 @@
 """Unit tests for Kalshi order-book normalization (the YES/NO derivation)."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pmarb.feeds.kalshi import KalshiFeed, _asks_from_bids, normalize_orderbook
 from pmarb.models import PriceLevel
 
-OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=UTC)
 MARKET = {
     "ticker": "TEST-1",
     "title": "Will X happen?",
@@ -114,12 +114,13 @@ class TestPagination:
 
     def test_filters_out_mve_and_unquoted(self):
         bad = [
-            {"ticker": "KXMVE-1", "title": "q", "expiration_time": "2026-09-01T00:00:00Z",
+            {"ticker": "KXMVE-1", "title": "q",
+             "expiration_time": "2026-09-01T00:00:00Z",
              "yes_bid_dollars": "0.4", "yes_ask_dollars": "0.45"},          # MVE
             {"ticker": "OK-1", "title": "q", "expiration_time": "2026-09-01T00:00:00Z",
              "yes_bid_dollars": None, "yes_ask_dollars": None},             # no quote
         ]
-        page = {"events": [{"markets": bad + [self._mk("GOOD")]}], "cursor": ""}
+        page = {"events": [{"markets": [*bad, self._mk("GOOD")]}], "cursor": ""}
         feed, _ = self._feed_returning([page])
         markets = asyncio.run(feed.fetch_markets())
         assert [m.id for m in markets] == ["kalshi:GOOD"]
@@ -144,7 +145,7 @@ class TestStreamBooks:
             try:
                 return next(self._it)
             except StopIteration:
-                raise websockets.ConnectionClosed(None, None)
+                raise websockets.ConnectionClosed(None, None) from None
 
     class _FakeConnect:
         def __init__(self, ws):
@@ -158,6 +159,7 @@ class TestStreamBooks:
 
     def _run(self, monkeypatch, messages):
         import json
+
         import websockets
 
         from pmarb.feeds import kalshi as kmod

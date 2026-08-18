@@ -13,9 +13,9 @@ Two operations (see CLAUDE.md):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
 
 from pmarb.config import (
     MAX_FILLABLE_CAP,
@@ -37,7 +37,7 @@ _TAKER_FEE: dict[str, FeeFn] = {
 class FillPlan:
     """The economics of the largest viable hedge on a pair, in one direction."""
 
-    size: int                   # contracts fillable on BOTH legs while viable (0 = none)
+    size: int                   # contracts fillable on BOTH legs (0 = none)
     avg_yes_fill: float         # depth-walked average price paid for YES
     avg_no_fill: float          # depth-walked average price paid for NO
     yes_fee_per_share: float    # level-accumulated YES fee / size

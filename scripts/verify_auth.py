@@ -13,7 +13,6 @@ import urllib.request
 from pmarb.credentials import KalshiCredentials, PolymarketUSCredentials
 from pmarb.feeds.auth import kalshi_headers, polymarket_us_headers
 
-
 # Polymarket US sits behind Cloudflare, which 1010-blocks non-browser User-Agents
 # (the default urllib UA gets a 403 before auth is even checked). A browser-like
 # UA is required on every request to that venue.
@@ -34,7 +33,7 @@ def _get(url: str, headers: dict[str, str]):
             return resp.status, resp.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
-    except Exception as e:  # noqa: BLE001 - surface any connection issue plainly
+    except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
 

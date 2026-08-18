@@ -1,5 +1,6 @@
 """Unit tests for the Market data contract."""
 
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta
 
 import pytest
@@ -8,16 +9,16 @@ from pmarb.models import Market, PriceLevel
 
 
 def make_market(**overrides) -> Market:
-    base = dict(
-        id="kalshi:TEST-1",
-        platform="kalshi",
-        question="Will it rain tomorrow?",
-        resolution_date=datetime(2026, 9, 1),
-        category="weather",
-        yes_depth=(PriceLevel(0.42, 100.0), PriceLevel(0.45, 200.0)),
-        no_depth=(PriceLevel(0.55, 150.0), PriceLevel(0.58, 300.0)),
-        updated_at=datetime(2026, 6, 24, 12, 0, 0),
-    )
+    base = {
+        "id": "kalshi:TEST-1",
+        "platform": "kalshi",
+        "question": "Will it rain tomorrow?",
+        "resolution_date": datetime(2026, 9, 1),
+        "category": "weather",
+        "yes_depth": (PriceLevel(0.42, 100.0), PriceLevel(0.45, 200.0)),
+        "no_depth": (PriceLevel(0.55, 150.0), PriceLevel(0.58, 300.0)),
+        "updated_at": datetime(2026, 6, 24, 12, 0, 0),
+    }
     base.update(overrides)
     return Market(**base)
 
@@ -44,7 +45,7 @@ class TestMarketAsks:
 class TestMarketImmutability:
     def test_frozen(self):
         m = make_market()
-        with pytest.raises(Exception):  # FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
             m.question = "changed"  # type: ignore[misc]
 
 

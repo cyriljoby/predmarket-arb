@@ -1,7 +1,7 @@
 """Unit tests for Polymarket US market-data normalization."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pmarb.feeds.polymarket import (
     PolymarketUSFeed,
@@ -10,7 +10,7 @@ from pmarb.feeds.polymarket import (
 )
 from pmarb.models import PriceLevel
 
-OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=UTC)
 MARKET = {
     "slug": "tec-mlb-nlchamp",
     "question": "National League Champion",
@@ -145,7 +145,7 @@ class TestPagination:
 
     def test_walks_pages_until_short(self):
         pages = [
-            {"markets": [self._mk("a"), self._mk("b")]},  # full page (PAGE=2) -> continue
+            {"markets": [self._mk("a"), self._mk("b")]},  # full page -> continue
             {"markets": [self._mk("c")]},                  # short page -> stop
         ]
         feed, calls = self._feed_returning(pages)
@@ -174,8 +174,8 @@ class TestStreamBooks:
             import websockets
             try:
                 return next(self._it)
-            except StopIteration:
-                raise websockets.ConnectionClosed(None, None)  # end the stream
+            except StopIteration:  # end the stream
+                raise websockets.ConnectionClosed(None, None) from None
 
     class _FakeConnect:
         def __init__(self, ws):
@@ -189,6 +189,7 @@ class TestStreamBooks:
 
     def test_yields_markets_and_batches_subscribe(self, monkeypatch):
         import json
+
         import websockets
 
         from pmarb.feeds import polymarket as pmod

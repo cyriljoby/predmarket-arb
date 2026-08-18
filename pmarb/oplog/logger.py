@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pmarb.config import LOG_PATH
@@ -24,7 +24,7 @@ def opportunity_record(
     ev: PairEvaluation, match: dict, *, now: datetime | None = None
 ) -> dict[str, Any]:
     """Build the flat log record for one evaluation + its match metadata."""
-    ts = (now or datetime.now(timezone.utc)).isoformat()
+    ts = (now or datetime.now(UTC)).isoformat()
     strat = f"YES_{ev.yes_platform}_NO_{ev.no_platform}".upper()
     return {
         "timestamp": ts,
@@ -61,7 +61,8 @@ class OpportunityLogger:
         self._fh = open(path, "a")
         self.count = 0
 
-    def log(self, ev: PairEvaluation, match: dict, *, now: datetime | None = None) -> None:
+    def log(self, ev: PairEvaluation, match: dict, *,
+            now: datetime | None = None) -> None:
         self._fh.write(json.dumps(opportunity_record(ev, match, now=now)) + "\n")
         self._fh.flush()
         self.count += 1
@@ -69,7 +70,7 @@ class OpportunityLogger:
     def close(self) -> None:
         self._fh.close()
 
-    def __enter__(self) -> "OpportunityLogger":
+    def __enter__(self) -> OpportunityLogger:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -97,7 +98,8 @@ class LatestOpportunityLog:
         self._last_write = 0.0
         self._fh = open(path, "w")
 
-    def log(self, ev: PairEvaluation, match: dict, *, now: datetime | None = None) -> None:
+    def log(self, ev: PairEvaluation, match: dict, *,
+            now: datetime | None = None) -> None:
         rec = opportunity_record(ev, match, now=now)
         self._latest[(rec["kalshi_market_id"], rec["polymarket_market_id"])] = rec
         t = time.monotonic()
@@ -120,7 +122,7 @@ class LatestOpportunityLog:
         self._dump()
         self._fh.close()
 
-    def __enter__(self) -> "LatestOpportunityLog":
+    def __enter__(self) -> LatestOpportunityLog:
         return self
 
     def __exit__(self, *exc) -> None:

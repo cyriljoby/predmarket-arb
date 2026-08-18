@@ -4,7 +4,9 @@ Single source of truth for tunable values so no magic numbers hide in logic.
 """
 
 # Market Matching
-MATCH_THRESHOLD = 0.75            # min string similarity to flag a market pair. Needs to be tuned manually
+# Min string similarity to flag a market pair. Tuned by hand; only the lexical
+# matcher reads it (structured and futures score on their own scales).
+MATCH_THRESHOLD = 0.75
 RESOLUTION_DATE_TOLERANCE_DAYS = 10  # resolution dates must fall within this window
 # Futures/outright matching (structured). Venues pad outright resolution dates
 # more loosely than games, so a wider window; season disambiguation still leans
@@ -18,9 +20,12 @@ FUTURES_ENTITY_MIN = 0.6         # min entity-name score (reuses competitor_scor
 FUTURES_COMPETITION_MIN = 0.65
 
 # Spread Detection
-SLIPPAGE_BUFFER = 0.01            # required headroom above fee-adjusted break-even (per share)
+# Required headroom above the fee-adjusted break-even, per share.
+SLIPPAGE_BUFFER = 0.01
 MAX_FILLABLE_CAP = 1000          # hard upper bound on the max_fillable_size search
-# Staleness gate: the two legs come from independent feeds that updated at different rates. If either leg is too old, we dont trust the srpead
+# Staleness gate: the two legs come from independent feeds that update at
+# different rates. If either leg's snapshot is older than this, the spread is
+# a comparison against a stale quote, not an arb — so it is discarded.
 MAX_LEG_STALENESS_SECONDS = 2.0
 
 # Runtime
@@ -31,7 +36,10 @@ RECONNECT_MAX_SECONDS = 30.0     # WS reconnect backoff cap
 LOG_PATH = "opportunities.jsonl"              # append-only event log (backtest)
 LATEST_LOG_PATH = "opportunities_latest.jsonl"  # keyed snapshot, one line per open pair
 MATCH_LOG_PATH = "matches.json"
-LOG_HEARTBEAT_SECONDS = 30    # append a per-pair sample at most this often (bounds log size)
+# Throttle on the append log, per pair. NOTE: this bounds log size but also
+# caps duration resolution — a window shorter than this yields one row and
+# reads as 0s. 86% of Phase 1 windows fell below it.
+LOG_HEARTBEAT_SECONDS = 30
 
 # Fees
 # Kalshi taker fee = KALSHI_FEE_COEFFICIENT * price * (1 - price) per contract.
