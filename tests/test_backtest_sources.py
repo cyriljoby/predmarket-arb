@@ -127,3 +127,39 @@ class TestRunBacktestIsPure:
         rep = run_backtest(rows, [_match()], source="t")
         assert rep["samples"] == 1
         assert rep["retracted_by_match_set"]["pairs"] == 1
+
+
+class TestAnnualisedReturn:
+    """The edge is time-blind; this is what makes windows comparable."""
+
+    def _s(self, days, **over):
+        base = dict(fill_yes=0.42, fill_no=0.57, spread_fee_adj=0.01,
+                    resolution_date_a=NOW + timedelta(days=days))
+        return _sample(**{**base, **over})
+
+    def test_short_dated_edge_beats_an_identical_long_dated_one(self):
+        # 1c settling in a week is worth vastly more than 1c settling in 3 years,
+        # and spread_fee_adj alone ranks them equal.
+        assert self._s(7).annualised_return > 40 * self._s(1095).annualised_return
+
+    def test_uses_the_later_leg(self):
+        # Capital is locked until both settle, so the nearer date must not win.
+        s = self._s(30, resolution_date_b=NOW + timedelta(days=400))
+        assert s.days_to_settlement == 400
+
+    def test_is_a_rate_on_capital_not_on_notional(self):
+        # 1c edge on 99c of cost over a year is ~1%/yr, not 1c/yr.
+        s = self._s(365, fill_yes=0.42, fill_no=0.57, spread_fee_adj=0.01)
+        assert s.annualised_return == pytest.approx(0.01 / 0.99, rel=1e-6)
+
+    def test_sub_day_horizons_floor_at_one_day(self):
+        # Otherwise a window on a market settling in hours divides by zero and
+        # reports an infinite rate.
+        assert self._s(0).annualised_return == pytest.approx(0.01 / 0.99 * 365)
+
+    def test_none_without_a_settlement_date(self):
+        # Legacy JSONL rows predate the captured dates — unknowable, not zero.
+        assert _sample(fill_yes=0.42, fill_no=0.57).annualised_return is None
+
+    def test_none_without_fill_prices(self):
+        assert self._s(30, fill_yes=None).annualised_return is None

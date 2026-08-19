@@ -63,6 +63,8 @@ def _windows(rows: list[Sample], labels: dict) -> list[dict]:
 
 def _close_window(pair: tuple, samples: list[Sample], labels: dict) -> dict:
     span = (samples[-1].observed_at - samples[0].observed_at).total_seconds()
+    best = max(samples, key=lambda s: s.spread_fee_adj)
+    ann = best.annualised_return
     return {
         "pair": pair,
         # `samples` is what distinguishes an honestly-brief window from one that
@@ -70,8 +72,12 @@ def _close_window(pair: tuple, samples: list[Sample], labels: dict) -> dict:
         # "unknown, bounded below by the sampling rate", not "instantaneous".
         "samples": len(samples),
         "duration_seconds": round(span, 1),
-        "best_fee_adjusted_spread": max(s.spread_fee_adj for s in samples),
+        "best_fee_adjusted_spread": best.spread_fee_adj,
         "best_size": max(s.fillable_size for s in samples),
+        # The edge is time-blind; this is what makes windows comparable. Taken
+        # from the best-edge sample so it pairs with the spread reported above.
+        "days_to_settlement": best.days_to_settlement,
+        "annualised_return_pct": round(ann * 100, 2) if ann is not None else None,
         "question": samples[0].question,
         "resolution_match": labels.get(pair),
     }
@@ -131,6 +137,41 @@ def _sample_from_log(d: dict) -> Sample:
         fill_yes=d.get("yes_fill_price"), fill_no=d.get("no_fill_price"),
         fee_yes=d.get("yes_fee_per_share"), fee_no=d.get("no_fee_per_share"),
     )
+
+
+SURVIVAL_CUTOFFS = (0, 5, 30, 60, 300, 900)
+
+
+def _persistence(windows: list[dict]) -> dict:
+    """Windows by how long they survived, with the annualised return at each.
+
+    The two questions that decide tradeability are "was it open long enough to
+    act on" and "is the edge worth the capital it locks up". Reporting them
+    together is deliberate: on this data the windows that persist are the
+    long-dated illiquid ones, which persist BECAUSE nobody can profitably close
+    them, and either number alone hides that.
+    """
+    out = []
+    for cutoff in SURVIVAL_CUTOFFS:
+        g = [w for w in windows if w["duration_seconds"] >= cutoff]
+        if not g:
+            out.append({"min_duration_seconds": cutoff, "windows": 0})
+            continue
+        ann = sorted(w["annualised_return_pct"] for w in g
+                     if w["annualised_return_pct"] is not None)
+        out.append({
+            "min_duration_seconds": cutoff,
+            "windows": len(g),
+            "pairs": len({tuple(w["pair"]) for w in g}),
+            "median_edge": round(median(w["best_fee_adjusted_spread"] for w in g), 4),
+            "median_size": median(w["best_size"] for w in g),
+            "median_annualised_return_pct": round(median(ann), 2) if ann else None,
+            "best_annualised_return_pct": round(max(ann), 2) if ann else None,
+            # Windows with no settlement date on either leg — legacy JSONL rows
+            # predate the captured dates, so their return is unknowable.
+            "no_settlement_date": len(g) - len(ann),
+        })
+    return out
 
 
 def run_backtest(rows: list[Sample], matches: list[dict],
@@ -330,6 +371,7 @@ def run_backtest(rows: list[Sample], matches: list[dict],
                              key=lambda w: w["best_fee_adjusted_spread"],
                              reverse=True),
         },
+        "persistence": _persistence(windows),
     }
     return report
 
@@ -375,12 +417,29 @@ def _print_summary(rep: dict) -> None:
           f"median duration {wd['median_duration_seconds']}s, "
           f"{wd['single_sample_windows']} single-sample")
 
+    print("\npersistence — how long windows lasted, and what the edge is worth:")
+    print(f"  {'survived':>9} {'windows':>8} {'pairs':>6} {'med edge':>9} "
+          f"{'med size':>9} {'med %/yr':>9} {'best %/yr':>10}")
+    for p in rep["persistence"]:
+        if not p["windows"]:
+            print(f"  {p['min_duration_seconds']:>8}s {0:>8}")
+            continue
+        ann = p["median_annualised_return_pct"]
+        best = p["best_annualised_return_pct"]
+        print(f"  {p['min_duration_seconds']:>8}s {p['windows']:>8} {p['pairs']:>6} "
+              f"{p['median_edge'] * 100:>8.2f}c {p['median_size']:>9.0f} "
+              f"{(f'{ann:.2f}' if ann is not None else '-'):>9} "
+              f"{(f'{best:.2f}' if best is not None else '-'):>10}")
+
     print("\ntop windows by fee-adjusted spread:")
     for w in wd["detail"][:10]:
         label = {True: "OK", False: "DIVERGED", None: "unreviewed"}[
             w["resolution_match"]]
+        ann = w["annualised_return_pct"]
+        rate = f"{ann:>6.1f}%/yr" if ann is not None else "     -    "
         print(f"  ${w['best_fee_adjusted_spread']:.4f} x{w['best_size']:<5} "
-              f"{w['duration_seconds']:>6.0f}s [{label}] {w['question'][:52]}")
+              f"{w['duration_seconds']:>6.0f}s {rate} [{label}] "
+              f"{w['question'][:40]}")
 
     print(f"\nHEADLINE: {hl['statement']}")
 

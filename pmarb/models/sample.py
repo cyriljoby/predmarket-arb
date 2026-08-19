@@ -75,3 +75,35 @@ class Sample:
         """When capital is freed — the LATER leg, since both must settle."""
         dates = [d for d in (self.resolution_date_a, self.resolution_date_b) if d]
         return max(dates) if dates else None
+
+    @property
+    def days_to_settlement(self) -> int | None:
+        if self.settles_at is None:
+            return None
+        return max((self.settles_at - self.observed_at).days, 0)
+
+    @property
+    def cost_per_share(self) -> float | None:
+        """What one hedged share costs: both legs, at depth-walked fill prices."""
+        if self.fill_yes is None or self.fill_no is None:
+            return None
+        return self.fill_yes + self.fill_no
+
+    @property
+    def annualised_return(self) -> float | None:
+        """Return per year on the capital this hedge locks up, as a fraction.
+
+        `spread_fee_adj` is time-blind: it ranks 1c on a three-year presidential
+        contract above 0.9c on a game settling tonight, when the second is worth
+        roughly 40x more. Capital is committed until BOTH legs settle, so the
+        holding period is what converts an edge into a rate.
+
+        Simple (not compounded) and 365-day, because the input is a point
+        estimate off a sub-second window — compounding it would imply a
+        precision the measurement does not have. Sub-day horizons floor at one
+        day for the same reason.
+        """
+        days, cost = self.days_to_settlement, self.cost_per_share
+        if days is None or not cost:
+            return None
+        return (self.spread_fee_adj / cost) * 365.0 / max(days, 1)
