@@ -16,7 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.16"]
+api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+dev = ["pytest>=8", "ruff>=0.16", "httpx"]
 
 [tool.setuptools.packages.find]
 include = ["pmarb*"]
