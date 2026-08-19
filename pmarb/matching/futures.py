@@ -45,13 +45,21 @@ _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 _TIE_MARGIN = 1e-9
 
 # Sub-event selectors: words that pick out ONE contract within a competition
-# (Stage 9, Round 1, Top 3). Any pure number is also a selector. These must
-# match EXACTLY between two competitions — a "Stage 9" market may only pair
-# with a "Stage 9" market, never with the overall "Tour de France Winner".
+# (Stage 9, Round 1, Top 3, MVP *Finalists*). Any pure number is also a
+# selector. These must match EXACTLY between two competitions — a "Stage 9"
+# market may only pair with a "Stage 9" market, never with the overall "Tour de
+# France Winner", and "American League MVP Finalists" may not pair with
+# "American League MVP" (being one of three finalists is a far likelier event
+# than winning, so that pairing manufactures a large phantom edge).
+#
 # Synonym-y type words (winner/champion/finals/leader) are deliberately NOT
 # selectors — venues phrase those inconsistently; they're scored as name tokens.
+# Nor is "nominee": venues split between "be the nominee" and "win the
+# nomination", which tokenize differently, so making it a selector would reject
+# correct pairs rather than wrong ones.
 _SELECTOR_KEYWORDS = frozenset(
-    "stage round leg heat group top matchday game".split()
+    "stage round leg heat group top matchday game "
+    "finalist finalists semifinalist semifinalists shortlist shortlisted".split()
 )
 
 

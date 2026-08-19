@@ -254,3 +254,23 @@ class TestCompetitionFloor:
                                  "2026 Nobel Peace Prize Winner") >= 0.75
         assert competition_score("Oscar winner: Best Actress",
                                  "Oscar Winner: Best Actress") >= 0.75
+
+
+class TestFinalistSelector:
+    """Being a finalist for an award is a different contract from winning it."""
+
+    def test_mvp_finalists_does_not_pair_with_mvp(self):
+        # Real pairing found in the live catalogs, scoring exactly 0.75 — it sat
+        # on the floor and produced 46 wrong pairs across both leagues.
+        assert competition_score("American League MVP Finalists",
+                                 "American League MVP") == 0.0
+
+    def test_finalists_still_pairs_with_finalists(self):
+        assert competition_score("American League MVP Finalists",
+                                 "American League MVP finalists") >= 0.75
+
+    def test_nominee_is_not_a_selector(self):
+        # Venues split between "be the nominee" and "win the nomination"; making
+        # nominee a selector would reject these correct pairs.
+        assert competition_score("2028 Democratic presidential nominee",
+                                 "2028 Democratic Presidential Nominee") >= 0.75
