@@ -29,6 +29,10 @@ from pmarb.config import (
     RECONNECT_MAX_SECONDS,
 )
 from pmarb.credentials import KalshiCredentials, PolymarketUSCredentials
+from pmarb.db import connect, dsn
+from pmarb.db.schema import ensure_partitions
+from pmarb.db.sync import pair_ids, upsert_markets
+from pmarb.db.writer import ObservationWriter, to_row
 from pmarb.detection.spread import evaluate_pair
 from pmarb.feeds._util import now_utc
 from pmarb.feeds.kalshi import KalshiFeed
@@ -39,35 +43,42 @@ from pmarb.oplog import LatestOpportunityLog, OpportunityLogger
 _TRUSTED = {"structured", "futures"}
 
 
-def should_append(
+# Why a row exists. Persisted on every observation, because "no row" and "a row
+# we chose not to write" are different facts and the difference is what made
+# Phase 1's futures numbers floors rather than measurements.
+HEARTBEAT, EDGE_CHANGE, VIABLE, WINDOW_CLOSE = 0, 1, 2, 3
+
+
+def sample_reason(
     *, is_viable: bool, was_viable: bool, is_structured: bool,
     edge: float, last_edge: float | None, seconds_since_last: float,
     heartbeat: float = LOG_HEARTBEAT_SECONDS,
-) -> bool:
-    """Asymmetric sampling rule for the append log.
+) -> int | None:
+    """Why this evaluation should be recorded, or None to skip it.
 
-    A uniform throttle destroys the one thing this log exists to measure. A
+    A uniform throttle destroys the one thing the log exists to measure. A
     window opens and closes ON a book update, so every evaluation while viable
-    is sampled — that puts duration resolution at the update stream rather than
+    is recorded — that puts duration resolution at the update stream rather than
     at an arbitrary timer. Phase 1 throttled the viable case too, so any window
     shorter than the heartbeat produced a single row and read as 0s; 86% of them
     did.
 
-    Three cases:
-      viable      -> always, unthrottled.
-      close       -> the first NON-viable evaluation after a viable one. The
-                     only row written because a pair is *not* viable, and the
-                     only thing that pins the window's end.
-      otherwise   -> throttled, and only live games, whose edge actually moves.
-                     Static outrights sit at fake positive edges on illiquid
-                     books and would firehose.
+      VIABLE       -> always, unthrottled.
+      WINDOW_CLOSE -> the first NON-viable evaluation after a viable one. The
+                      only row written because a pair is *not* viable, and the
+                      only thing that pins the window's end.
+      EDGE_CHANGE  -> throttled, and only live games, whose edge actually moves.
+                      Static outrights sit at fake positive edges on illiquid
+                      books and would firehose.
     """
     if is_viable:
-        return True
+        return VIABLE
     if was_viable:
-        return True
-    return (is_structured and edge != last_edge
-            and seconds_since_last >= heartbeat)
+        return WINDOW_CLOSE
+    if (is_structured and edge != last_edge
+            and seconds_since_last >= heartbeat):
+        return EDGE_CHANGE
+    return None
 
 
 async def _fetch_with_retry(feed, attempts: int = 8):
@@ -124,6 +135,24 @@ async def run(duration: float | None) -> None:
         latest_log = LatestOpportunityLog(  # keyed snapshot
             LATEST_LOG_PATH, flush_interval=2.0
         )
+        # DUAL-WRITE. Postgres is the destination; the JSONL sinks stay until the
+        # database is trusted, so a writer bug costs debugging time rather than
+        # a week of collection. Database problems must never stop collection, so
+        # every failure here degrades to file-only with a warning.
+        writer: ObservationWriter | None = None
+        pair_id: dict[tuple[str, str], int] = {}
+        try:
+            with connect() as conn:
+                ensure_partitions(conn)
+                upsert_markets(conn, k_mkts + p_mkts)
+                conn.commit()
+                pair_id = pair_ids(conn)
+            writer = ObservationWriter(dsn())
+            await writer.start()
+            print(f"dual-writing to Postgres ({len(pair_id)} known pairs)")
+        except Exception as exc:
+            print(f"  WARNING Postgres unavailable ({type(exc).__name__}: {exc}); "
+                  f"continuing with file sinks only")
         # pair -> (last append time, last edge, was viable last evaluation)
         last_append: dict[tuple, tuple] = {}
         stats = {"updates": 0, "windows": 0}
@@ -195,7 +224,7 @@ async def run(duration: float | None) -> None:
                     )
                     edge = round(ev.raw_spread_top_of_book, 4)
 
-                    should_log = should_append(
+                    reason = sample_reason(
                         is_viable=is_viable,
                         was_viable=was_viable,
                         is_structured=is_structured,
@@ -204,8 +233,13 @@ async def run(duration: float | None) -> None:
                         seconds_since_last=tmono - last_t,
                     )
 
-                    if should_log:
+                    if reason is not None:
                         event_log.log(ev, match)
+                        pid = pair_id.get(key)
+                        if writer is not None and pid is not None:
+                            writer.submit(to_row(
+                                ev, pid, reason, now,
+                                k.resolution_date, p.resolution_date))
                         last_append[key] = (tmono, edge, is_viable)
                         if is_viable and not was_viable:
                             stats["windows"] += 1   # count WINDOWS, not samples
@@ -216,9 +250,17 @@ async def run(duration: float | None) -> None:
             t0 = time.time()
             while True:
                 await asyncio.sleep(10)
+                db = ""
+                if writer is not None:
+                    w = writer.stats
+                    # dropped/failed are surfaced every tick: a silent drop means
+                    # the database fell behind and observations were lost.
+                    db = (f" db={w.written}"
+                          + (f" DROPPED={w.dropped}" if w.dropped else "")
+                          + (f" FAILED={w.failed}" if w.failed else ""))
                 print(f"  [{time.time() - t0:4.0f}s] updates={stats['updates']:>7} "
                       f"books={len(cache):>5} samples={event_log.count} "
-                      f"windows={stats['windows']} tracked={latest_log.count}")
+                      f"windows={stats['windows']} tracked={latest_log.count}{db}")
 
         tasks = [
             asyncio.create_task(consume(kfeed, k_mkts)),
@@ -237,6 +279,9 @@ async def run(duration: float | None) -> None:
                 t.cancel()
             event_log.close()
             latest_log.close()
+            if writer is not None:
+                await writer.stop()
+                print(f"  db writer: {writer.stats}")
             print(f"\n{event_log.count} samples ({stats['windows']} positive-edge "
                   f"windows) over {stats['updates']} updates "
                   f"-> {event_log._path} (append, for backtest)\n"

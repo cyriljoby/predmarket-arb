@@ -134,39 +134,44 @@ class TestLatestLog:
         assert log.count == 2
 
 
-class TestAppendSamplingRule:
+class TestSampleReason:
     """The asymmetric grain: dense while viable, one close marker, else throttled."""
 
     def rule(self, **kw):
-        from pmarb.main import should_append
+        from pmarb.main import sample_reason
         base = {"is_viable": False, "was_viable": False, "is_structured": False,
                 "edge": 0.01, "last_edge": 0.01, "seconds_since_last": 999.0}
-        return should_append(**{**base, **kw})
+        return sample_reason(**{**base, **kw})
 
     def test_viable_is_never_throttled(self):
         # The Phase 1 bug: a window shorter than the heartbeat logged once and
         # reported 0s duration. Viable samples must ignore the throttle.
-        assert self.rule(is_viable=True, seconds_since_last=0.0)
-        assert self.rule(is_viable=True, was_viable=True, seconds_since_last=0.01)
+        from pmarb.main import VIABLE
+        assert self.rule(is_viable=True, seconds_since_last=0.0) == VIABLE
+        assert self.rule(is_viable=True, was_viable=True,
+                         seconds_since_last=0.01) == VIABLE
 
     def test_first_non_viable_after_viable_is_logged_once(self):
-        assert self.rule(is_viable=False, was_viable=True, seconds_since_last=0.0)
+        from pmarb.main import WINDOW_CLOSE
+        assert self.rule(is_viable=False, was_viable=True,
+                         seconds_since_last=0.0) == WINDOW_CLOSE
 
     def test_and_then_goes_quiet(self):
-        assert not self.rule(is_viable=False, was_viable=False)
+        assert self.rule(is_viable=False, was_viable=False) is None
 
     def test_quiet_non_viable_futures_never_log(self):
         # Static outrights sit at fake positive edges; they would firehose.
-        assert not self.rule(is_structured=False, edge=0.02, last_edge=0.01)
+        assert self.rule(is_structured=False, edge=0.02, last_edge=0.01) is None
 
     def test_live_game_logs_on_edge_change_past_the_heartbeat(self):
+        from pmarb.main import EDGE_CHANGE
         assert self.rule(is_structured=True, edge=0.02, last_edge=0.01,
-                         seconds_since_last=31.0)
+                         seconds_since_last=31.0) == EDGE_CHANGE
 
     def test_live_game_stays_quiet_when_the_edge_has_not_moved(self):
-        assert not self.rule(is_structured=True, edge=0.01, last_edge=0.01,
-                             seconds_since_last=31.0)
+        assert self.rule(is_structured=True, edge=0.01, last_edge=0.01,
+                         seconds_since_last=31.0) is None
 
     def test_live_game_respects_the_throttle_between_changes(self):
-        assert not self.rule(is_structured=True, edge=0.02, last_edge=0.01,
-                             seconds_since_last=5.0)
+        assert self.rule(is_structured=True, edge=0.02, last_edge=0.01,
+                         seconds_since_last=5.0) is None

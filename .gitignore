@@ -13,11 +13,12 @@ venv/
 *private*key*
 
 # Project data outputs (generated at runtime)
-opportunities.jsonl
-opportunities_latest.jsonl
-matches.json
-matches_review.json
-backtest_report.json
+# Collected data and derived reports — regenerated, never committed. Globs
+# rather than exact names so archived/era-split variants cannot leak in.
+opportunities*.jsonl
+matches*.json
+reviews.json
+backtest_report*.json
 
 # Project spec / private instructions
 CLAUDE.md
