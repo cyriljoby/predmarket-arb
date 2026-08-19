@@ -1,21 +1,19 @@
 """core schema: market, match_pair, observation
 
 Revision ID: c8d2a04273b8
-Revises: 
+Revises:
 Create Date: 2026-08-18 22:39:21.435226
 
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 from alembic import op
-import sqlalchemy as sa
-
 
 # revision identifiers, used by Alembic.
 revision: str = 'c8d2a04273b8'
-down_revision: Union[str, Sequence[str], None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -56,7 +54,8 @@ def upgrade() -> None:
             market_a_id       text NOT NULL REFERENCES market(id),
             market_b_id       text NOT NULL REFERENCES market(id),
             match_method      text NOT NULL
-                              CHECK (match_method IN ('structured','futures','lexical')),
+                              CHECK (match_method IN
+                                     ('structured','futures','lexical')),
             similarity_score  numeric(6,4) NOT NULL,
             date_delta_days   integer,
 
