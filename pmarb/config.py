@@ -13,11 +13,14 @@ RESOLUTION_DATE_TOLERANCE_DAYS = 10  # resolution dates must fall within this wi
 # on it because competition strings drop the year.
 FUTURES_DATE_TOLERANCE_DAYS = 30
 FUTURES_ENTITY_MIN = 0.6         # min entity-name score (reuses competitor_score)
-# Min normalized-competition overlap. 0.65 (not 0.5) because a single shared
-# common token — "James" in "James Harden" vs "LeBron James", "NASCAR"/"Series"
-# across Truck vs Cup — otherwise pairs different contracts. Same-competition
-# matches score ~0.75-1.0 and clear it comfortably.
-FUTURES_COMPETITION_MIN = 0.65
+# Min normalized-competition overlap. Raised 0.65 -> 0.75 once stated-year
+# matching stopped the date gate from masking weak competition scores: at 0.65 a
+# few shared generic tokens paired different contracts — "Pro Basketball: Best
+# Regular Season Record" with "Pro Football Best Regular Season Record" (0.71),
+# "NASCAR Cup Series Regular Season Champion" with "NASCAR Cup Series Champion"
+# (0.67), and every "qualify for the ACC Championship" with "advances to the CFP
+# National Championship" (0.6667). Genuine same-competition pairs score 0.75-1.0.
+FUTURES_COMPETITION_MIN = 0.75
 
 # Spread Detection
 # Required headroom above the fee-adjusted break-even, per share.

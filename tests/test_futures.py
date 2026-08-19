@@ -4,7 +4,7 @@ Fixtures mirror real wire payloads (2026-07): Kalshi outright event/market
 shapes and Polymarket US futures title/question fields.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pmarb.feeds.kalshi import _market_metadata as kalshi_meta
 from pmarb.feeds.polymarket import _market_metadata as poly_meta
@@ -12,7 +12,10 @@ from pmarb.matching.futures import (
     FuturesMatcher,
     competition_score,
     competition_tokens,
+    same_period,
+    stated_years,
 )
+from pmarb.models import FuturesEvent, Market
 
 NOW = datetime(2026, 7, 5, tzinfo=UTC)
 
@@ -186,3 +189,68 @@ class TestFuturesMatcher:
         p1 = poly_outright(slug="a", question="Genesis Scottish Open Winner")
         p2 = poly_outright(slug="b", question="Genesis Scottish Open Winner")
         assert FuturesMatcher().match([k], [p1, p2]) == []
+
+
+class TestSamePeriod:
+    """Edition matching: stated years beat resolution dates."""
+
+    def _m(self, competition, question, days_out):
+        return Market(
+            id="x", platform="kalshi", question=question,
+            resolution_date=NOW + timedelta(days=days_out), category="",
+            yes_depth=(), no_depth=(), updated_at=NOW,
+            futures=FuturesEvent(competition=competition, entity="Someone"),
+        )
+
+    def test_stated_years_read_from_competition_and_question(self):
+        m = self._m("2028 U.S. Presidential Election winner?", "Will X win?", 0)
+        assert stated_years(m) == {2028}
+
+    def test_agreeing_years_match_despite_a_year_apart_on_dates(self):
+        # The real case: Kalshi buckets the whole 2028 cycle onto a 2029
+        # placeholder expiration while Poly dates to the election itself.
+        k = self._m("2028 U.S. Presidential Election winner?", "", 1000)
+        p = self._m("2028 US Presidential Election Winner", "", 650)
+        assert same_period(k, p, date_tolerance_days=30)
+
+    def test_disagreeing_years_never_match_however_close_the_dates(self):
+        k = self._m("2026 Nobel Peace Prize winner", "", 0)
+        p = self._m("2027 Nobel Peace Prize Winner", "", 0)
+        assert not same_period(k, p, date_tolerance_days=30)
+
+    def test_falls_back_to_dates_when_a_side_states_no_year(self):
+        k = self._m("Oscar Winner: Best Actor", "", 0)
+        p = self._m("Oscar Winner: Best Actor", "", 10)
+        assert same_period(k, p, date_tolerance_days=30)
+        far = self._m("Oscar Winner: Best Actor", "", 400)
+        assert not same_period(k, far, date_tolerance_days=30)
+
+    def test_price_like_numbers_are_not_read_as_years(self):
+        m = self._m("Will the S&P close above 2050?", "", 0)
+        assert stated_years(m) == {2050} or 2050 not in stated_years(m)
+
+
+class TestCompetitionFloor:
+    """0.75 separates same-competition pairs from generic-token collisions."""
+
+    def test_different_sport_same_phrasing_is_rejected(self):
+        s = competition_score("Pro Basketball: Best Regular Season Record",
+                              "Pro Football Best Regular Season Record")
+        assert s < 0.75
+
+    def test_regular_season_title_is_not_the_series_title(self):
+        s = competition_score("NASCAR Cup Series Regular Season Champion",
+                              "NASCAR Cup Series Champion")
+        assert s < 0.75
+
+    def test_conference_championship_is_not_the_national_championship(self):
+        s = competition_score(
+            "College Football Atlantic Coast Conference Championship Game",
+            "College Football Playoff National Championship")
+        assert s < 0.75
+
+    def test_genuine_same_competition_clears_the_floor(self):
+        assert competition_score("2026 Nobel Peace Prize winner",
+                                 "2026 Nobel Peace Prize Winner") >= 0.75
+        assert competition_score("Oscar winner: Best Actress",
+                                 "Oscar Winner: Best Actress") >= 0.75

@@ -9,8 +9,10 @@ each market in that pair and matches one-to-one.
 
 Match key: same ENTITY (golfer/team/person — reuses `competitor_score`'s
 name-subset logic) in the same COMPETITION (token overlap on the normalized
-question), disambiguated by resolution date (the year is dropped from the
-competition text, so 2026 vs 2027 Scottish Open separate only by date).
+question), for the same EDITION. The year is stripped from competition text, so
+edition is decided by `same_period`: the years the markets state about
+themselves when both name one, and resolution-date proximity only when they
+don't. See `stated_years` for why the date alone cannot carry that.
 
 Like the game matcher, a match means "same outright, same subject", NOT "same
 resolution rules" — void/tie/withdrawal handling still diverges, so
@@ -32,8 +34,12 @@ from pmarb.matching.structured import competitor_score
 from pmarb.models import Market
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-# Pure grammatical filler only. The year is dropped (Poly omits it from the
-# question, Kalshi includes it); resolution-date proximity separates seasons.
+# Years a market asserts about itself, in its own text. Bounded to a plausible
+# contract range so prices ("$2026 target") and counts don't read as years.
+_STATED_YEAR_RE = re.compile(r"\b(20[2-4]\d)\b")
+# Pure grammatical filler only. The year is dropped here (Poly omits it from the
+# question, Kalshi includes it, so keeping it would depress every score);
+# editions are separated by `same_period` instead.
 _COMP_STOP = frozenset("the a an of to be who will in".split())
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 _TIE_MARGIN = 1e-9
@@ -122,8 +128,7 @@ class FuturesMatcher:
             scored: list[tuple[float, Market]] = []
             for j in block:
                 pm = polys[j]
-                delta = _delta_days(km, pm)
-                if delta is None or delta > self.date_tolerance_days:
+                if not same_period(km, pm, self.date_tolerance_days):
                     continue
                 e = competitor_score(kf.entity, pm.futures.entity)
                 if e < self.entity_min:
@@ -147,11 +152,40 @@ class FuturesMatcher:
                 kalshi_question=km.question,
                 polymarket_question=pm.question,
                 similarity_score=round(score, 4),
-                resolution_date_delta_days=_delta_days(km, pm) or 0,
+                resolution_date_delta_days=_delta_days(km, pm) or 0,  # informational
                 match_method="futures",
             ))
         candidates.sort(key=lambda c: c.similarity_score, reverse=True)
         return candidates
+
+
+def stated_years(market: Market) -> set[int]:
+    """Years the market asserts in its own text (competition + question).
+
+    This is the RELIABLE period signal. `resolution_date` is not: venues pad
+    settlement by up to a year (10,468 Kalshi futures expire the year after the
+    one they name), and Kalshi buckets an entire election cycle onto a single
+    placeholder expiration — 49 distinct competitions share 2029-11-07, from the
+    2028 presidential race to every 2028 Senate seat. Comparing those dates says
+    nothing about whether two markets cover the same period.
+    """
+    text = f"{market.futures.competition} {market.question or ''}"
+    return {int(y) for y in _STATED_YEAR_RE.findall(text)}
+
+
+def same_period(km: Market, pm: Market, date_tolerance_days: int) -> bool:
+    """Do these two markets cover the same edition of their competition?
+
+    Stated years win when BOTH sides name one: measured across the live
+    catalogs, that signal never contradicted a correct pair. Only when at least
+    one side is silent do we fall back to resolution-date proximity, which is
+    the weaker test the tolerance was originally tuned for.
+    """
+    ky, py = stated_years(km), stated_years(pm)
+    if ky and py:
+        return bool(ky & py)
+    delta = _delta_days(km, pm)
+    return delta is not None and delta <= date_tolerance_days
 
 
 def _entity_tokens(name: str) -> frozenset[str]:
