@@ -1,0 +1,21 @@
+# Local Postgres for development. The collector and backtest talk to this via
+# PMARB_DSN; nothing here is production infrastructure.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: pmarb-db
+    environment:
+      POSTGRES_USER: pmarb
+      POSTGRES_PASSWORD: pmarb
+      POSTGRES_DB: pmarb
+    ports:
+      - "5433:5432"          # 5433 on the host to avoid clashing with a local PG
+    volumes:
+      - pmarb-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pmarb -d pmarb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  pmarb-pgdata:

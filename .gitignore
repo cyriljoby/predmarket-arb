@@ -31,3 +31,5 @@ CLAUDE.md
 *.log
 *.bak
 matches_prededupe.json
+
+# Local DB volume is managed by docker compose, never committed
