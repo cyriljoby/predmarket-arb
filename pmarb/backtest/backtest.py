@@ -23,16 +23,12 @@ from pmarb.config import (
     MATCH_LOG_PATH,
     SLIPPAGE_BUFFER,
 )
+from pmarb.models import Sample
 
 REPORT_PATH = "backtest_report.json"
 # A viable sample this much apart from the previous one (seconds) starts a new
 # window rather than extending the old one (heartbeat is 30s; allow 3 missed).
 WINDOW_GAP_SECONDS = 120.0
-
-
-def _pair(row: dict) -> tuple[str, str]:
-    return (row["kalshi_market_id"], row["polymarket_id"]) if "polymarket_id" in row \
-        else (row["kalshi_market_id"], row["polymarket_market_id"])
 
 
 def _pct(n: int, d: int) -> float:
@@ -43,66 +39,114 @@ def _avg(xs: list[float]) -> float | None:
     return round(sum(xs) / len(xs), 4) if xs else None
 
 
-def _viable(row: dict) -> bool:
-    return row["fee_adjusted_spread"] > 0 and row["estimated_fillable_size"] > 0
-
-
-def _windows(rows: list[dict]) -> list[dict]:
+def _windows(rows: list[Sample], labels: dict) -> list[dict]:
     """Group each pair's viable samples into contiguous windows; return one
     record per window with its duration (span of its samples, seconds)."""
-    by_pair: dict[tuple, list[dict]] = defaultdict(list)
+    by_pair: dict[tuple, list[Sample]] = defaultdict(list)
     for r in rows:
-        if _viable(r):
-            by_pair[_pair(r)].append(r)
+        if r.viable:
+            by_pair[r.pair].append(r)
     windows = []
     for pair, samples in by_pair.items():
-        samples.sort(key=lambda r: r["timestamp"])
-        current: list[dict] = []
+        samples.sort(key=lambda s: s.observed_at)
+        current: list[Sample] = []
         for r in samples:
-            t = datetime.fromisoformat(r["timestamp"])
-            if current and (t - datetime.fromisoformat(current[-1]["timestamp"])
+            if current and (r.observed_at - current[-1].observed_at
                             ).total_seconds() > WINDOW_GAP_SECONDS:
-                windows.append(_close_window(pair, current))
+                windows.append(_close_window(pair, current, labels))
                 current = []
             current.append(r)
         if current:
-            windows.append(_close_window(pair, current))
+            windows.append(_close_window(pair, current, labels))
     return windows
 
 
-def _close_window(pair: tuple, samples: list[dict]) -> dict:
-    t0 = datetime.fromisoformat(samples[0]["timestamp"])
-    t1 = datetime.fromisoformat(samples[-1]["timestamp"])
+def _close_window(pair: tuple, samples: list[Sample], labels: dict) -> dict:
+    span = (samples[-1].observed_at - samples[0].observed_at).total_seconds()
     return {
         "pair": pair,
+        # `samples` is what distinguishes an honestly-brief window from one that
+        # was only ever seen once. A duration of 0s with a single sample means
+        # "unknown, bounded below by the sampling rate", not "instantaneous".
         "samples": len(samples),
-        "duration_seconds": round((t1 - t0).total_seconds(), 1),
-        "best_fee_adjusted_spread": max(s["fee_adjusted_spread"] for s in samples),
-        "best_size": max(s["estimated_fillable_size"] for s in samples),
-        "question": samples[0].get("question", ""),
-        "resolution_match": samples[0].get("resolution_match"),
+        "duration_seconds": round(span, 1),
+        "best_fee_adjusted_spread": max(s.spread_fee_adj for s in samples),
+        "best_size": max(s.fillable_size for s in samples),
+        "question": samples[0].question,
+        "resolution_match": labels.get(pair),
     }
 
 
-def run_backtest(log_path: str = LOG_PATH,
-                 match_path: str = MATCH_LOG_PATH,
-                 latest_path: str = LATEST_LOG_PATH) -> dict:
-    rows = [json.loads(line) for line in open(log_path) if line.strip()]
+def load_from_files(log_path: str = LOG_PATH,
+                    match_path: str = MATCH_LOG_PATH,
+                    latest_path: str = LATEST_LOG_PATH) -> tuple[list, list, set]:
+    """Read a backtest's inputs off disk. One of two sources; see db/sources.py.
+
+    Keeping this path working is what makes the Phase 1 result reproducible:
+    the published numbers came from JSONL, and they must stay recomputable from
+    the frozen bundle after the collector moves to Postgres.
+    """
+    rows = [_sample_from_log(json.loads(line))
+            for line in open(log_path) if line.strip()]
     # The append log only samples interesting pairs; the honest "of all pairs
     # monitored, how many ever went viable" denominator is the tracked set.
     try:
-        tracked = {_pair(json.loads(line))
+        tracked = {_log_pair(json.loads(line))
                    for line in open(latest_path) if line.strip()}
     except FileNotFoundError:
         tracked = set()
-    if not rows:
-        raise SystemExit(f"{log_path} is empty — nothing to backtest")
-
-    # --- resolution-match funnel (X/Y/Z) over candidate matches ------------ #
     try:
         matches = json.load(open(match_path))
     except FileNotFoundError:
         matches = []
+    return rows, matches, tracked
+
+
+def _log_pair(d: dict) -> tuple[str, str]:
+    """Pair key from a legacy log line, which used two spellings over its life."""
+    return (d["kalshi_market_id"],
+            d.get("polymarket_id") or d["polymarket_market_id"])
+
+
+def _sample_from_log(d: dict) -> Sample:
+    """Adapt a Phase 1 JSONL line onto the schema's vocabulary.
+
+    The legacy format is venue-specific (kalshi_/polymarket_) and predates
+    sample_reason and the captured resolution dates, so those stay None. This
+    adapter exists so the frozen Phase 1 bundle keeps replaying; the DATABASE is
+    canonical, not this shape.
+    """
+    a, b = _log_pair(d)
+    return Sample(
+        observed_at=datetime.fromisoformat(d["timestamp"]),
+        market_a_id=a, market_b_id=b,
+        spread_top=d["raw_spread_top_of_book"],
+        spread_depth=d["raw_spread_depth_adjusted"],
+        spread_fee_adj=d["fee_adjusted_spread"],
+        fillable_size=d["estimated_fillable_size"],
+        question=d.get("question", ""),
+        match_method=d.get("match_method", ""),
+        yes_venue=d.get("yes_platform", ""),
+        ask_top_yes=d.get("yes_ask_top"), ask_top_no=d.get("no_ask_top"),
+        fill_yes=d.get("yes_fill_price"), fill_no=d.get("no_fill_price"),
+        fee_yes=d.get("yes_fee_per_share"), fee_no=d.get("no_fee_per_share"),
+    )
+
+
+def run_backtest(rows: list[Sample], matches: list[dict],
+                 tracked: set | None = None, *, source: str = "") -> dict:
+    """Compute the funnel from already-loaded inputs.
+
+    Takes data, not paths, so a file reader and a database cursor are two
+    callers of ONE implementation. The alternative — recomputing the funnel in
+    SQL for the API — means two definitions of subtle rules (cohort separation,
+    A==B by construction, the futures floor) that drift silently. The failure
+    mode there is not a crash, it is a plausible wrong percentage, and this
+    project has already shipped one of those.
+    """
+    tracked = set(tracked or ())
+    if not rows:
+        raise SystemExit(f"no samples to backtest ({source or 'unknown source'})")
 
     # The collector streams whatever match set existed when it launched; the
     # match file is the current, corrected one. A pair the matcher has since
@@ -111,21 +155,23 @@ def run_backtest(log_path: str = LOG_PATH,
     # count in any numerator OR denominator.
     if matches:
         valid = {(m["kalshi_id"], m["polymarket_id"]) for m in matches}
-        kept_rows = [r for r in rows if _pair(r) in valid]
+        kept_rows = [r for r in rows if r.pair in valid]
         retracted_rows = len(rows) - len(kept_rows)
-        retracted_pairs = len({_pair(r) for r in rows} - valid)
+        retracted_pairs = len({r.pair for r in rows} - valid)
         rows = kept_rows
         tracked &= valid
         if not rows:
             raise SystemExit(
-                f"no sample in {log_path} survives the match set in {match_path}")
+                f"no sample survives the current match set ({source or 'source'})")
     else:
         retracted_rows = retracted_pairs = 0
     n_cand = len(matches)
+    # Labels are read from the CURRENT match set, never from the sample. A row
+    # records what was believed when it was written; a verdict can be revised
+    # afterwards, and 93 pairs were re-reviewed under a stricter standard after
+    # the 30-day run. Samples stay immutable and the label is looked up by pair.
     labels = {(m["kalshi_id"], m["polymarket_id"]): m.get("resolution_match")
               for m in matches}
-    for r in rows:  # log rows carry the label as of log time; use current labels
-        r["resolution_match"] = labels.get(_pair(r), r.get("resolution_match"))
 
     # Two review cohorts, reported SEPARATELY because they answer different
     # questions and only one of them is an unbiased estimator:
@@ -159,18 +205,18 @@ def run_backtest(log_path: str = LOG_PATH,
     # the old report print A=B=C=100%.
     by_pair = defaultdict(list)
     for r in rows:
-        by_pair[_pair(r)].append(r)
+        by_pair[r.pair].append(r)
     tracked |= set(by_pair)
     method = {(m["kalshi_id"], m["polymarket_id"]): m.get("match_method")
               for m in matches}
 
     def _funnel(pairs: set) -> dict:
         a = sum(1 for p in pairs
-                if any(r["raw_spread_top_of_book"] > 0 for r in by_pair.get(p, ())))
+                if any(r.spread_top > 0 for r in by_pair.get(p, ())))
         b = sum(1 for p in pairs
-                if any(r["raw_spread_depth_adjusted"] > 0 for r in by_pair.get(p, ())))
+                if any(r.spread_depth > 0 for r in by_pair.get(p, ())))
         c = sum(1 for p in pairs
-                if any(_viable(r) for r in by_pair.get(p, ())))
+                if any(r.viable for r in by_pair.get(p, ())))
         return {
             "tracked": len(pairs),
             "sampled_in_log": sum(1 for p in pairs if p in by_pair),
@@ -210,14 +256,14 @@ def run_backtest(log_path: str = LOG_PATH,
     }
 
     # --- economics on viable samples --------------------------------------- #
-    viable_rows = [r for r in rows if _viable(r)]
-    sizes = sorted(r["estimated_fillable_size"] for r in viable_rows)
-    fees = [r["yes_fee_per_share"] + r["no_fee_per_share"] for r in rows]
+    viable_rows = [r for r in rows if r.viable]
+    sizes = sorted(r.fillable_size for r in viable_rows)
+    fees = [r.total_fee for r in rows]
 
     # --- time structure ----------------------------------------------------- #
-    times = sorted(datetime.fromisoformat(r["timestamp"]) for r in rows)
+    times = sorted(r.observed_at for r in rows)
     span_h = (times[-1] - times[0]).total_seconds() / 3600 if len(times) > 1 else 0.0
-    windows = _windows(rows)
+    windows = _windows(rows, labels)
     durations = sorted(w["duration_seconds"] for w in windows)
     single = sum(1 for w in windows if w["samples"] == 1)
 
@@ -246,8 +292,7 @@ def run_backtest(log_path: str = LOG_PATH,
     }
 
     report = {
-        "log_path": log_path,
-        "match_path": match_path,
+        "source": source,
         "samples": len(rows),
         "retracted_by_match_set": {
             "samples": retracted_rows,
@@ -264,13 +309,11 @@ def run_backtest(log_path: str = LOG_PATH,
         "funnel": funnel,
         "spreads": {
             "avg_raw_top_of_book_when_positive": _avg(
-                [r["raw_spread_top_of_book"] for r in rows
-                 if r["raw_spread_top_of_book"] > 0]),
+                [r.spread_top for r in rows if r.spread_top > 0]),
             "avg_depth_adjusted_when_positive": _avg(
-                [r["raw_spread_depth_adjusted"] for r in rows
-                 if r["raw_spread_depth_adjusted"] > 0]),
+                [r.spread_depth for r in rows if r.spread_depth > 0]),
             "avg_fee_adjusted_on_viable": _avg(
-                [r["fee_adjusted_spread"] for r in viable_rows]),
+                [r.spread_fee_adj for r in viable_rows]),
             "break_even_spread": round((_avg(fees) or 0.0) + SLIPPAGE_BUFFER, 4),
         },
         "fillable_size_on_viable": {
@@ -346,7 +389,9 @@ def main() -> None:
     log_path = sys.argv[1] if len(sys.argv) > 1 else LOG_PATH
     match_path = sys.argv[2] if len(sys.argv) > 2 else MATCH_LOG_PATH
     latest_path = sys.argv[3] if len(sys.argv) > 3 else LATEST_LOG_PATH
-    report = run_backtest(log_path, match_path, latest_path)
+    rows, matches, tracked = load_from_files(log_path, match_path, latest_path)
+    report = run_backtest(rows, matches, tracked,
+                          source=f"{log_path} + {match_path}")
     _print_summary(report)
     with open(REPORT_PATH, "w") as fh:
         json.dump(report, fh, indent=2)
