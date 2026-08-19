@@ -1,28 +1,15 @@
-"""FastAPI service over the observation store.
+"""Read-only FastAPI service over the observation store. No auth, one process.
 
-Read-only, no auth, single process — this serves one person looking at their
-own collector's output, and pretending otherwise would be architecture theatre.
+Handlers are `def`, not `async def`: psycopg is a blocking driver, and FastAPI
+runs `def` handlers in a threadpool so they cannot stall the event loop.
 
-TWO DELIBERATE CHOICES, both about honesty rather than mechanics:
+`verified_only` defaults to FALSE — only 152 of 3,025 pairs carry a review
+verdict, so the unfiltered view is the exploratory one. Every row carries
+`resolution_match`; anything quoted as a finding needs verified_only=true.
 
-1. Endpoints are plain `def`, not `async def`. psycopg's sync driver blocks,
-   and blocking the event loop is exactly the failure the collector's writer
-   was built to avoid. FastAPI runs `def` handlers in a threadpool, so the
-   blocking call is isolated. Making these `async def` while calling sync
-   psycopg inside would look more modern and be strictly worse.
+Polling, not push. SSE can be added later against the same queries.
 
-2. `verified_only` defaults to TRUE everywhere it appears. An unreviewed pair
-   is a candidate, not an opportunity; Phase 1's whole finding was that most
-   apparent edge dies at the matching layer, and a default that folded
-   unreviewed pairs into the headline would re-tell the lie the review process
-   exists to prevent. Callers can pass verified_only=false explicitly.
-
-Polling, not push: the collector's write path is already decoupled from
-delivery, so SSE/WebSocket can be added later against the same queries without
-touching detection.
-
-Run it:  uvicorn pmarb.api.app:app --reload
-Docs:    http://127.0.0.1:8000/docs
+Run it:  uvicorn pmarb.api.app:app --reload   (docs at /docs)
 """
 
 from __future__ import annotations
@@ -68,11 +55,18 @@ def opportunities(
     within_seconds: int = Query(120, ge=1, le=86_400,
                                 description="How recent an observation must be "
                                             "to count as still open."),
-    verified_only: bool = Query(True, description="Restrict to pairs reviewed "
-                                                  "as resolution_match=true."),
+    verified_only: bool = Query(False, description="Restrict to pairs reviewed "
+                                                   "as resolution_match=true. "
+                                                   "Off by default: unreviewed "
+                                                   "pairs are candidates, not "
+                                                   "verified arbitrage."),
     limit: int = Query(50, ge=1, le=500),
 ) -> list[dict[str, Any]]:
     """Currently-open viable windows, widest fee-adjusted edge first.
+
+    Unreviewed pairs are INCLUDED by default; check `resolution_match` on each
+    row before treating one as a hedge. Pass verified_only=true for the
+    reviewed-only view.
 
     A window is open when the pair's MOST RECENT observation is both viable and
     recent. An older viable row means a window was open then, not now — and
@@ -109,7 +103,7 @@ def funnel() -> list[dict[str, Any]]:
 
 
 @app.get("/stats/frontier", tags=["stats"])
-def frontier(verified_only: bool = Query(True)) -> dict[str, Any]:
+def frontier(verified_only: bool = Query(False)) -> dict[str, Any]:
     """Average edge at quarter-points of the depth walk vs. at its end.
 
     The final point is the largest size that still cleared the gate, so it sits
@@ -123,7 +117,7 @@ def frontier(verified_only: bool = Query(True)) -> dict[str, Any]:
 
 
 @app.get("/stats/horizon", tags=["stats"])
-def horizon(verified_only: bool = Query(True)) -> list[dict[str, Any]]:
+def horizon(verified_only: bool = Query(False)) -> list[dict[str, Any]]:
     """Edge by time to resolution, annualised.
 
     The headline number of the whole project lives here. A 1.3c edge on a

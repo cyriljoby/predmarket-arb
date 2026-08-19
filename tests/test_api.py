@@ -42,14 +42,17 @@ class TestJsonable:
 
 
 class TestVerifiedOnlyDefaults:
-    """An unreviewed pair is a candidate, not an opportunity. If these defaults
-    flip, the API starts reporting unverified edge as real arbitrage."""
+    """The default is exploratory: unreviewed pairs are included, because only
+    152 of 3,025 pairs carry a verdict and hiding the rest would misrepresent
+    the catalog. The guarantee that replaces the strict default is that every
+    row still carries `resolution_match`, so a caller can always tell a
+    verified hedge from an unlabelled candidate."""
 
-    def test_openapi_defaults_are_true(self):
+    def test_openapi_defaults_are_false(self):
         spec = app.openapi()
         for path in ("/opportunities", "/stats/frontier", "/stats/horizon"):
             params = {p["name"]: p for p in spec["paths"][path]["get"]["parameters"]}
-            assert params["verified_only"]["schema"]["default"] is True, path
+            assert params["verified_only"]["schema"]["default"] is False, path
 
     def test_no_write_routes_exist(self):
         # Read-only by construction: this is a measurement system.
@@ -76,10 +79,16 @@ class TestEndpoints:
         assert edges == sorted(edges, reverse=True)
 
     def test_verified_only_never_widens_the_result(self):
-        strict = self.client.get("/opportunities?limit=500").json()
-        loose = self.client.get("/opportunities?limit=500&verified_only=false").json()
+        strict = self.client.get("/opportunities?limit=500&verified_only=true").json()
+        loose = self.client.get("/opportunities?limit=500").json()
         assert len(strict) <= len(loose)
         assert all(r["resolution_match"] is True for r in strict)
+
+    def test_every_row_carries_its_verdict(self):
+        # This is what makes the permissive default safe: an unreviewed pair is
+        # visibly unreviewed rather than silently indistinguishable.
+        rows = self.client.get("/opportunities?limit=200").json()
+        assert all("resolution_match" in r for r in rows)
 
     def test_frontier_edge_decays_from_p25_to_final(self):
         f = self.client.get("/stats/frontier").json()

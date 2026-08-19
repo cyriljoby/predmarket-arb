@@ -1,16 +1,10 @@
-"""SQL for the API. Kept apart from the routes so the queries can be run and
-checked on their own — every one of these started life as a psql one-liner.
+"""SQL for the API, kept apart from the routes so each query can be run alone.
 
-READ-ONLY BY CONSTRUCTION. Nothing here writes, and the API has no write path:
-this is a measurement system, not a trading system, and an endpoint that could
-mutate a review verdict or an observation would undermine the only thing the
-data is good for.
+Read-only by construction — there is no write path anywhere in the API.
 
-`resolution_match` is the load-bearing filter. A pair nobody has reviewed is
-NOT evidence of an arb — it is an unlabelled candidate, and the whole Phase 1
-finding was that most apparent edge dies at the matching layer. So every
-endpoint that reports opportunities defaults to verified pairs only, and an
-unverified count is reported alongside rather than folded in.
+`resolution_match` is the load-bearing field: an unreviewed pair is a candidate,
+not an arb, and most apparent edge dies at the matching layer. `verified_only`
+filters on it and defaults to FALSE (see app.py).
 """
 
 from __future__ import annotations
