@@ -22,8 +22,9 @@ from collections import defaultdict
 import aiohttp
 
 from pmarb.config import (
+    EDGE_CHANGE_THROTTLE_SECONDS,
+    HEARTBEAT_SECONDS,
     LATEST_LOG_PATH,
-    LOG_HEARTBEAT_SECONDS,
     MATCH_LOG_PATH,
     RECONNECT_BASE_SECONDS,
     RECONNECT_MAX_SECONDS,
@@ -52,7 +53,8 @@ HEARTBEAT, EDGE_CHANGE, VIABLE, WINDOW_CLOSE = 0, 1, 2, 3
 def sample_reason(
     *, is_viable: bool, was_viable: bool, is_structured: bool,
     edge: float, last_edge: float | None, seconds_since_last: float,
-    heartbeat: float = LOG_HEARTBEAT_SECONDS,
+    throttle: float = EDGE_CHANGE_THROTTLE_SECONDS,
+    heartbeat: float = HEARTBEAT_SECONDS,
 ) -> int | None:
     """Why this evaluation should be recorded, or None to skip it.
 
@@ -60,24 +62,32 @@ def sample_reason(
     window opens and closes ON a book update, so every evaluation while viable
     is recorded — that puts duration resolution at the update stream rather than
     at an arbitrary timer. Phase 1 throttled the viable case too, so any window
-    shorter than the heartbeat produced a single row and read as 0s; 86% of them
+    shorter than the throttle produced a single row and read as 0s; 86% of them
     did.
 
       VIABLE       -> always, unthrottled.
-      WINDOW_CLOSE -> the first NON-viable evaluation after a viable one. The
-                      only row written because a pair is *not* viable, and the
-                      only thing that pins the window's end.
+      WINDOW_CLOSE -> the first NON-viable evaluation after a viable one, and
+                      the only thing that pins the window's end to better than
+                      one heartbeat.
       EDGE_CHANGE  -> throttled, and only live games, whose edge actually moves.
                       Static outrights sit at fake positive edges on illiquid
                       books and would firehose.
+      HEARTBEAT    -> nothing happened, but record it anyway every `heartbeat`
+                      seconds. This is the denominator: an absence of rows
+                      cannot distinguish "watched and never viable" from "never
+                      watched", and that ambiguity is what made Phase 1's rates
+                      floors instead of measurements. Last in the chain, so it
+                      only ever fires when no more specific reason applies.
     """
     if is_viable:
         return VIABLE
     if was_viable:
         return WINDOW_CLOSE
     if (is_structured and edge != last_edge
-            and seconds_since_last >= heartbeat):
+            and seconds_since_last >= throttle):
         return EDGE_CHANGE
+    if seconds_since_last >= heartbeat:
+        return HEARTBEAT
     return None
 
 
@@ -234,7 +244,13 @@ async def run(duration: float | None) -> None:
                     )
 
                     if reason is not None:
-                        event_log.log(ev, match)
+                        # Heartbeats go to Postgres only. They exist to make the
+                        # denominator countable, and the JSONL sinks are the
+                        # Phase 1 opportunity log — pouring ~375k rows/day of
+                        # "nothing happened" into them would change what that
+                        # file is without making any window easier to see.
+                        if reason != HEARTBEAT:
+                            event_log.log(ev, match)
                         pid = pair_id.get(key)
                         if writer is not None and pid is not None:
                             writer.submit(to_row(

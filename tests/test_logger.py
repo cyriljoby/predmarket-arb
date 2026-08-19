@@ -139,8 +139,10 @@ class TestSampleReason:
 
     def rule(self, **kw):
         from pmarb.main import sample_reason
+        # Default well inside the heartbeat interval, so these cases exercise
+        # the specific reasons rather than falling through to HEARTBEAT.
         base = {"is_viable": False, "was_viable": False, "is_structured": False,
-                "edge": 0.01, "last_edge": 0.01, "seconds_since_last": 999.0}
+                "edge": 0.01, "last_edge": 0.01, "seconds_since_last": 60.0}
         return sample_reason(**{**base, **kw})
 
     def test_viable_is_never_throttled(self):
@@ -162,6 +164,28 @@ class TestSampleReason:
     def test_quiet_non_viable_futures_never_log(self):
         # Static outrights sit at fake positive edges; they would firehose.
         assert self.rule(is_structured=False, edge=0.02, last_edge=0.01) is None
+
+    def test_quiet_pair_still_beats_once_per_heartbeat(self):
+        # The denominator. Without this row, "monitored and never viable" and
+        # "never monitored" are the same absence, which is what made Phase 1's
+        # rates floors rather than measurements.
+        from pmarb.main import HEARTBEAT
+        assert self.rule(seconds_since_last=301.0) == HEARTBEAT
+        assert self.rule(seconds_since_last=299.0) is None
+
+    def test_heartbeat_never_preempts_a_real_reason(self):
+        # It is last in the chain: a long-quiet pair that goes viable must be
+        # recorded as VIABLE, and a closing window as WINDOW_CLOSE.
+        from pmarb.main import VIABLE, WINDOW_CLOSE
+        assert self.rule(is_viable=True, seconds_since_last=9999.0) == VIABLE
+        assert self.rule(was_viable=True, seconds_since_last=9999.0) == WINDOW_CLOSE
+
+    def test_the_two_intervals_are_independent(self):
+        # One constant used to serve both roles. A live game past the 30s
+        # edge-change throttle must not have to wait for the 5-minute heartbeat.
+        from pmarb.main import EDGE_CHANGE
+        assert self.rule(is_structured=True, edge=0.02, last_edge=0.01,
+                         seconds_since_last=31.0) == EDGE_CHANGE
 
     def test_live_game_logs_on_edge_change_past_the_heartbeat(self):
         from pmarb.main import EDGE_CHANGE
