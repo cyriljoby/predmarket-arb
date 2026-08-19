@@ -258,7 +258,9 @@ class KalshiFeed:
             resp.raise_for_status()
             return await resp.json()
 
-    _MAX_PAGES = 100  # safety cap (~20k events) against a runaway cursor loop
+    # Runaway guard against a cursor that never terminates. Sits far above the
+    # real catalog; hitting it is reported, never silently accepted.
+    _MAX_PAGES = 1000
 
     @staticmethod
     def _is_tradeable(m: dict) -> bool:
@@ -276,7 +278,8 @@ class KalshiFeed:
         cursor pagination. Returns metadata Markets (empty depth).
 
         Stops when a page returns no events, an empty cursor, or a repeated
-        cursor (defensive), and is hard-capped at `_MAX_PAGES`.
+        cursor (defensive). `_MAX_PAGES` is a runaway guard, and hitting it
+        is reported rather than silently returning a partial catalog.
         """
         now = _now_utc()
         markets: list[Market] = []
@@ -297,6 +300,12 @@ class KalshiFeed:
             if not events or not next_cursor or next_cursor == cursor:
                 break
             cursor = next_cursor
+        else:
+            # Exhausted the guard while the cursor was still advancing — more
+            # events exist than we fetched. A truncated catalog produces a
+            # quietly incomplete match set, so say so.
+            print(f"  WARNING {self.platform} discovery hit the {self._MAX_PAGES}-page "
+                  f"guard at {len(markets)} markets — catalog is TRUNCATED")
         return markets
 
     async def stream_books(

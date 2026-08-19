@@ -39,6 +39,37 @@ from pmarb.oplog import LatestOpportunityLog, OpportunityLogger
 _TRUSTED = {"structured", "futures"}
 
 
+def should_append(
+    *, is_viable: bool, was_viable: bool, is_structured: bool,
+    edge: float, last_edge: float | None, seconds_since_last: float,
+    heartbeat: float = LOG_HEARTBEAT_SECONDS,
+) -> bool:
+    """Asymmetric sampling rule for the append log.
+
+    A uniform throttle destroys the one thing this log exists to measure. A
+    window opens and closes ON a book update, so every evaluation while viable
+    is sampled — that puts duration resolution at the update stream rather than
+    at an arbitrary timer. Phase 1 throttled the viable case too, so any window
+    shorter than the heartbeat produced a single row and read as 0s; 86% of them
+    did.
+
+    Three cases:
+      viable      -> always, unthrottled.
+      close       -> the first NON-viable evaluation after a viable one. The
+                     only row written because a pair is *not* viable, and the
+                     only thing that pins the window's end.
+      otherwise   -> throttled, and only live games, whose edge actually moves.
+                     Static outrights sit at fake positive edges on illiquid
+                     books and would firehose.
+    """
+    if is_viable:
+        return True
+    if was_viable:
+        return True
+    return (is_structured and edge != last_edge
+            and seconds_since_last >= heartbeat)
+
+
 async def _fetch_with_retry(feed, attempts: int = 8):
     """Startup market discovery over REST — retry transient network failures
     (connection resets, DNS blips, gateway 5xx) so a blip at launch doesn't
@@ -93,7 +124,8 @@ async def run(duration: float | None) -> None:
         latest_log = LatestOpportunityLog(  # keyed snapshot
             LATEST_LOG_PATH, flush_interval=2.0
         )
-        last_append: dict[tuple, float] = {}       # per-pair last append-log time
+        # pair -> (last append time, last edge, was viable last evaluation)
+        last_append: dict[tuple, tuple] = {}
         stats = {"updates": 0, "windows": 0}
 
         async def consume(feed, mkts) -> None:
@@ -136,31 +168,49 @@ async def run(duration: float | None) -> None:
                         continue
                     # Keyed snapshot: every pair, always (bounded — one line/pair).
                     latest_log.log(ev, match)
-                    # Append time series, kept bounded:
-                    #  - a truly VIABLE window (fillable size > 0) is always logged
-                    #    (real arb — rare, never miss one);
-                    #  - otherwise only LIVE GAME markets (structured tier) get a
-                    #    throttled heartbeat sample. Static futures/outrights sit at
-                    #    fake positive edges on illiquid books and would firehose,
-                    #    so they're logged only when actually viable.
+                    # Append time series. The sampling rate is ASYMMETRIC on
+                    # purpose, because a uniform throttle destroys the one thing
+                    # this log exists to measure:
+                    #   VIABLE      -> every evaluation, unthrottled. A window
+                    #                  opens and closes ON a book update, so
+                    #                  sampling each one measures its duration
+                    #                  to the resolution of the update stream.
+                    #   CLOSE       -> the first non-viable evaluation after a
+                    #                  viable one, logged once. The only row
+                    #                  written BECAUSE a pair is not viable, and
+                    #                  the only thing that pins closed_at.
+                    #   everything  -> throttled, and only live games, whose
+                    #     else         edge actually moves. Static outrights sit
+                    #                  at fake positive edges on illiquid books
+                    #                  and would firehose.
+                    # Phase 1 throttled the viable case too, so any window
+                    # shorter than the heartbeat produced one row and read as
+                    # 0s duration — 86% of them did.
                     is_viable = ev.estimated_fillable_size > 0
                     is_structured = match.get("match_method") == "structured"
                     key = (match["kalshi_id"], match["polymarket_id"])
                     tmono = time.monotonic()
-                    last_t, last_edge = last_append.get(key, (0.0, None))
+                    last_t, last_edge, was_viable = last_append.get(
+                        key, (0.0, None, False)
+                    )
                     edge = round(ev.raw_spread_top_of_book, 4)
-                    # Sample a live game (structured) or any viable pair on the
-                    # heartbeat. Games additionally require the edge to have
-                    # CHANGED (quiet games log once then go silent); viable pairs
-                    # log every heartbeat even when static — an open window on a
-                    # sleepy futures book must keep sampling or its duration is
-                    # unmeasurable (it would look like a single-row blip).
-                    if ((is_viable or (is_structured and edge != last_edge))
-                            and tmono - last_t >= LOG_HEARTBEAT_SECONDS):
+
+                    should_log = should_append(
+                        is_viable=is_viable,
+                        was_viable=was_viable,
+                        is_structured=is_structured,
+                        edge=edge,
+                        last_edge=last_edge,
+                        seconds_since_last=tmono - last_t,
+                    )
+
+                    if should_log:
                         event_log.log(ev, match)
-                        last_append[key] = (tmono, edge)
-                        if is_viable:
-                            stats["windows"] += 1
+                        last_append[key] = (tmono, edge, is_viable)
+                        if is_viable and not was_viable:
+                            stats["windows"] += 1   # count WINDOWS, not samples
+                    else:
+                        last_append[key] = (last_t, last_edge, is_viable)
 
         async def report() -> None:
             t0 = time.time()

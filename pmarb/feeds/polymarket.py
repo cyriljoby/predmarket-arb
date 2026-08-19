@@ -210,7 +210,10 @@ class PolymarketUSFeed:
 
     platform = "polymarket_us"
     _PAGE = 100
-    _MAX_PAGES = 200  # safety cap
+    # Runaway guard only — it must sit far above the real catalog (~22.4k
+    # markets as of 2026-08). It used to be 200, which silently truncated
+    # discovery at 20,000 and looked exactly like a completed fetch.
+    _MAX_PAGES = 2000
 
     def __init__(
         self, session: aiohttp.ClientSession, credentials: PolymarketUSCredentials
@@ -258,6 +261,12 @@ class PolymarketUSFeed:
             )
             if len(batch) < self._PAGE:
                 break
+        else:
+            # Loop ran to the guard without a short page, so the catalog is
+            # larger than we fetched. Never fail silently here: a truncated
+            # catalog produces a quietly incomplete match set.
+            print(f"  WARNING {self.platform} discovery hit the {self._MAX_PAGES}-page "
+                  f"guard at {len(markets)} markets — catalog is TRUNCATED")
         return markets
 
     _SUB_BATCH = 200  # max marketSlugs per subscribe message

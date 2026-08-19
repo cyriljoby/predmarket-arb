@@ -132,3 +132,41 @@ class TestLatestLog:
             log.log(self._ev(0.02), m2, now=NOW)
         assert len(path.read_text().strip().splitlines()) == 2
         assert log.count == 2
+
+
+class TestAppendSamplingRule:
+    """The asymmetric grain: dense while viable, one close marker, else throttled."""
+
+    def rule(self, **kw):
+        from pmarb.main import should_append
+        base = {"is_viable": False, "was_viable": False, "is_structured": False,
+                "edge": 0.01, "last_edge": 0.01, "seconds_since_last": 999.0}
+        return should_append(**{**base, **kw})
+
+    def test_viable_is_never_throttled(self):
+        # The Phase 1 bug: a window shorter than the heartbeat logged once and
+        # reported 0s duration. Viable samples must ignore the throttle.
+        assert self.rule(is_viable=True, seconds_since_last=0.0)
+        assert self.rule(is_viable=True, was_viable=True, seconds_since_last=0.01)
+
+    def test_first_non_viable_after_viable_is_logged_once(self):
+        assert self.rule(is_viable=False, was_viable=True, seconds_since_last=0.0)
+
+    def test_and_then_goes_quiet(self):
+        assert not self.rule(is_viable=False, was_viable=False)
+
+    def test_quiet_non_viable_futures_never_log(self):
+        # Static outrights sit at fake positive edges; they would firehose.
+        assert not self.rule(is_structured=False, edge=0.02, last_edge=0.01)
+
+    def test_live_game_logs_on_edge_change_past_the_heartbeat(self):
+        assert self.rule(is_structured=True, edge=0.02, last_edge=0.01,
+                         seconds_since_last=31.0)
+
+    def test_live_game_stays_quiet_when_the_edge_has_not_moved(self):
+        assert not self.rule(is_structured=True, edge=0.01, last_edge=0.01,
+                             seconds_since_last=31.0)
+
+    def test_live_game_respects_the_throttle_between_changes(self):
+        assert not self.rule(is_structured=True, edge=0.02, last_edge=0.01,
+                             seconds_since_last=5.0)
