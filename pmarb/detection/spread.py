@@ -14,7 +14,7 @@ Two operations (see CLAUDE.md):
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from pmarb.config import (
@@ -43,6 +43,10 @@ class FillPlan:
     yes_fee_per_share: float    # level-accumulated YES fee / size
     no_fee_per_share: float     # level-accumulated NO fee / size
     fee_adjusted_spread: float  # per-share profit after slippage + fees
+    # (size, edge) sampled at quarter-points of the walk, best-price end first.
+    # Empty when nothing clears. See _frontier for why this cannot be recovered
+    # after the fact.
+    frontier: tuple[tuple[int, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +81,32 @@ def compute_fill_price(depth: tuple[PriceLevel, ...], shares: int) -> float | No
     return None  # insufficient liquidity
 
 
+_FRONTIER_PCTS = (25, 50, 75)
+
+
+def _frontier(edges: list[float], size: int) -> tuple[tuple[int, float], ...]:
+    """Sample the size/edge curve at quarter-points of the viable walk.
+
+    Average fill prices only rise as size grows, so the edge decays along the
+    walk and the final point — the largest size that still clears — is its worst.
+    Reporting only that point pins every opportunity at its own truncation edge,
+    which is the buffer showing through rather than a property of the market.
+
+    These intermediate points exist only inside the walk: order books live in the
+    collector's memory and are never stored, so an edge not sampled here is gone.
+
+    Sizes are returned alongside edges because a bare percentile is not
+    comparable across rows — p25 is 250 shares on one pair and 3 on another, and
+    "edge above 2c at a size worth trading" needs the absolute number. p100 is
+    absent by design: that is (size, fee_adjusted_spread) on the plan itself.
+    """
+    if size <= 0:
+        return ()
+    # ceil, so even a 1-share walk yields a real sample rather than index -1
+    return tuple((n, edges[n - 1])
+                 for n in (-(-size * pct // 100) for pct in _FRONTIER_PCTS))
+
+
 def _whole_shares(depth: tuple[PriceLevel, ...]):
     """Yield one (whole) share's price at a time, walking the ladder."""
     for price, size in depth:
@@ -106,6 +136,7 @@ def max_fillable_size(
     filled = 0
     yes_cost = no_cost = yes_fee = no_fee = 0.0
     best = FillPlan(0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    edges: list[float] = []   # edge at every share count walked, for the frontier
 
     while filled < cap:
         yp = next(yes_gen, None)
@@ -125,11 +156,13 @@ def max_fillable_size(
             break  # cannot be viable now or for any larger size
 
         spread = 1.0 - avg_yes - avg_no - yes_fee / filled - no_fee / filled
+        edges.append(spread)
         if spread > buffer:
             best = FillPlan(
                 filled, avg_yes, avg_no, yes_fee / filled, no_fee / filled, spread
             )
-    return best
+    return (best if best.size == 0
+            else replace(best, frontier=_frontier(edges, best.size)))
 
 
 def detect_pair(
@@ -200,6 +233,9 @@ class PairEvaluation:
     yes_fee_per_share: float
     no_fee_per_share: float
     fee_adjusted_spread: float      # after slippage AND fees (may be <= 0)
+    # Quarter-points of the size/edge walk; empty when no size clears the gate
+    # (the single-contract branch below has no walk to sample).
+    frontier: tuple[tuple[int, float], ...] = ()
 
 
 def evaluate_pair(
@@ -250,6 +286,7 @@ def evaluate_pair(
                 yes_fee_per_share=plan.yes_fee_per_share,
                 no_fee_per_share=plan.no_fee_per_share,
                 fee_adjusted_spread=plan.fee_adjusted_spread,
+                frontier=plan.frontier,
             )
         else:
             # not fee-viable at any size — evaluate one contract (no slippage)

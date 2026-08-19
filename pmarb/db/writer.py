@@ -24,8 +24,12 @@ _INSERT = """
         match_pair_id, observed_at, sample_reason, yes_venue,
         yes_ask_top, no_ask_top, yes_fill_price, no_fill_price,
         yes_fee, no_fee, spread_top, spread_depth, spread_fee_adj,
-        fillable_size, resolution_date_a, resolution_date_b)
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        fillable_size,
+        size_at_p25, edge_at_p25, size_at_p50, edge_at_p50,
+        size_at_p75, edge_at_p75,
+        resolution_date_a, resolution_date_b)
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s)
     ON CONFLICT (match_pair_id, observed_at) DO NOTHING
 """
 
@@ -114,6 +118,17 @@ class ObservationWriter:
                   f"{type(exc).__name__}: {exc}")
 
 
+def _frontier_cells(frontier) -> tuple:
+    """Flatten the size/edge frontier into its six columns.
+
+    NULLs rather than zeros when the walk never cleared: no size was viable, so
+    there is no edge at any quarter-point, and a zero would read as one.
+    """
+    if not frontier:
+        return (None,) * 6
+    return tuple(cell for point in frontier for cell in point)
+
+
 def to_row(ev, match_pair_id: int, reason: int, observed_at: datetime,
            resolution_a: datetime | None, resolution_b: datetime | None) -> tuple:
     """Map a PairEvaluation onto the observation column order."""
@@ -123,5 +138,6 @@ def to_row(ev, match_pair_id: int, reason: int, observed_at: datetime,
         ev.yes_fee_per_share, ev.no_fee_per_share,
         ev.raw_spread_top_of_book, ev.raw_spread_depth_adjusted,
         ev.fee_adjusted_spread, ev.estimated_fillable_size,
+        *_frontier_cells(ev.frontier),
         resolution_a, resolution_b,
     )

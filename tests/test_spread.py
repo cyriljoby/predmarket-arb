@@ -83,6 +83,61 @@ class TestMaxFillableSize:
         assert plan.yes_fee_per_share < kalshi_fee_per_share(0.50)
 
 
+class TestFrontier:
+    """The intermediate points of the walk. Only the final (worst) point used to
+    survive, which pinned every recorded edge at its own truncation point."""
+
+    def test_quarter_points_are_sampled_with_absolute_sizes(self):
+        plan = max_fillable_size(
+            lvls((0.40, 100)), lvls((0.55, 100)),
+            kalshi_fee_per_share, poly_us_taker_fee_per_share, buffer=0.01, cap=1000,
+        )
+        assert plan.size == 100
+        assert [n for n, _ in plan.frontier] == [25, 50, 75]
+
+    def test_edge_decays_along_the_walk(self):
+        # Cheap YES depth first, then a jump — the edge at p25 must beat the
+        # edge at the truncation point, which is the whole reason for storing it.
+        plan = max_fillable_size(
+            lvls((0.30, 30), (0.45, 1000)), lvls((0.50, 2000)),
+            kalshi_fee_per_share, poly_us_taker_fee_per_share, buffer=0.01, cap=1000,
+        )
+        edges = [e for _, e in plan.frontier]
+        assert edges == sorted(edges, reverse=True)
+        assert edges[0] > plan.fee_adjusted_spread
+
+    def test_edges_match_a_direct_walk_at_that_size(self):
+        plan = max_fillable_size(
+            lvls((0.30, 30), (0.45, 1000)), lvls((0.50, 2000)),
+            kalshi_fee_per_share, poly_us_taker_fee_per_share, buffer=0.01, cap=1000,
+        )
+        for n, edge in plan.frontier:
+            at_n = max_fillable_size(
+                lvls((0.30, 30), (0.45, 1000)), lvls((0.50, 2000)),
+                kalshi_fee_per_share, poly_us_taker_fee_per_share,
+                buffer=0.01, cap=n,
+            )
+            assert at_n.size == n
+            assert at_n.fee_adjusted_spread == pytest.approx(edge)
+
+    def test_no_viable_size_has_no_frontier(self):
+        plan = max_fillable_size(
+            lvls((0.42, 100)), lvls((0.55, 100)),
+            kalshi_fee_per_share, poly_us_taker_fee_per_share, buffer=0.01, cap=1000,
+        )
+        assert plan.size == 0
+        assert plan.frontier == ()
+
+    def test_tiny_walk_still_yields_real_samples(self):
+        # 2 shares: quarter-points collapse but must stay >= 1, never index -1.
+        plan = max_fillable_size(
+            lvls((0.30, 2)), lvls((0.50, 2)),
+            kalshi_fee_per_share, poly_us_taker_fee_per_share, buffer=0.01, cap=1000,
+        )
+        assert plan.size == 2
+        assert [n for n, _ in plan.frontier] == [1, 1, 2]
+
+
 def make_market(platform, mid, *, yes=(), no=(), at=NOW):
     return Market(
         id=f"{platform}:{mid}", platform=platform, question="q",

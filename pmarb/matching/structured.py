@@ -43,6 +43,23 @@ from pmarb.models import Market
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Tokens that DISTINGUISH two otherwise-identical programs rather than decorate
+# one. "Kansas" and "Kansas St." are different schools; "Houston" and "Houston
+# Astros" are the same club. Both look like a subset to the token rule, so the
+# subset shortcut is refused whenever one side carries one of these and the
+# other does not. Learned live: KXNCAAFPLAYOFF-26-KSU (Kansas State) matched
+# Poly's Kansas market and became the highest-edge "arb" in the set — two
+# independent bets, not a hedge.
+_DISCRIMINATORS = frozenset({
+    "state", "saint", "tech", "aandm", "poly",
+    "northern", "southern", "eastern", "western", "central",
+})
+
+# "A&M" tokenizes to two single characters, which the length filter drops —
+# leaving "Texas A&M" indistinguishable from "Texas". Fold it to one token
+# first so it survives as a discriminator.
+_AANDM_RE = re.compile(r"\ba\s*&\s*m\b")
+
 # Alignment scores. Exact-token-set beats subset beats surname-only; the gap
 # between MIN_PAIR_SCORE and SUBSET is what lets an exact match win a tie
 # (e.g. a hypothetical "New York" that subset-matches two teams).
@@ -55,9 +72,22 @@ _TIE_MARGIN = 1e-9
 
 def _name_tokens(name: str) -> frozenset[str]:
     """Accent-folded, lowercased word tokens; single chars dropped (they're
-    disambiguators like the Y in Kalshi's 'New York Y', useless as tokens)."""
+    disambiguators like the Y in Kalshi's 'New York Y', useless as tokens).
+
+    "St." is ambiguous by position, and the two readings are different schools:
+    trailing it abbreviates State (Kansas St.), leading it abbreviates Saint
+    (St. John's). Both are folded to their full form so the discriminator check
+    sees them regardless of which venue's spelling arrived.
+    """
     folded = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
-    return frozenset(t for t in _TOKEN_RE.findall(folded.lower()) if len(t) > 1)
+    folded = _AANDM_RE.sub("aandm", folded.lower())
+    raw = _TOKEN_RE.findall(folded)
+    out = []
+    for i, t in enumerate(raw):
+        if t == "st":
+            t = "saint" if i == 0 else "state"
+        out.append(t)
+    return frozenset(t for t in out if len(t) > 1)
 
 
 def competitor_score(a: str, b: str) -> float:
@@ -67,12 +97,20 @@ def competitor_score(a: str, b: str) -> float:
     surnames ("Houston", "Pegula"), Poly uses full names ("Houston Astros",
     "Jessica Pegula"). Partial overlap scores by containment of the smaller
     set, floored below the acceptance threshold unless it's near-total.
+
+    Subset is refused when only one side carries a discriminator token, which
+    is what separates "Houston" / "Houston Astros" (same club) from "Kansas" /
+    "Kansas St." (different schools).
     """
     ta, tb = _name_tokens(a), _name_tokens(b)
     if not ta or not tb:
         return 0.0
     if ta == tb:
         return _EXACT
+    # A discriminator on one side only means these are different programs, not
+    # one program named at two levels of detail. Refuse before the subset rule.
+    if (ta ^ tb) & _DISCRIMINATORS:
+        return 0.0
     if ta <= tb or tb <= ta:
         return _SUBSET
     contained = len(ta & tb) / min(len(ta), len(tb))

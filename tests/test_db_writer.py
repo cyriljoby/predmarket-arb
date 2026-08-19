@@ -17,6 +17,7 @@ EV = PairEvaluation(
     raw_spread_top_of_book=0.03, raw_spread_depth_adjusted=0.011,
     yes_fee_per_share=0.0172, no_fee_per_share=0.0100,
     fee_adjusted_spread=0.0028,
+    frontier=((12, 0.0091), (24, 0.0060), (36, 0.0041)),
 )
 
 
@@ -52,6 +53,18 @@ class TestRowMapping:
         assert row[3] == "kalshi"           # yes_venue
         assert row[13] == 47                # fillable_size
         assert row[-2:] == ("A", "B")       # both resolution dates
+
+    def test_frontier_lands_in_its_six_columns(self):
+        row = to_row(EV, 1, 0, "T", None, None)
+        assert row[14:20] == (12, 0.0091, 24, 0.0060, 36, 0.0041)
+
+    def test_missing_frontier_is_null_not_zero(self):
+        # A zero edge at p25 would read as "measured and flat" rather than
+        # "never cleared, so there was no walk to sample".
+        from dataclasses import replace
+        row = to_row(replace(EV, estimated_fillable_size=0, frontier=()),
+                     1, 0, "T", None, None)
+        assert row[14:20] == (None,) * 6
 
     def test_all_three_spreads_are_carried(self):
         row = to_row(EV, 1, 0, "T", None, None)
