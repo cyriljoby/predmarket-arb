@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime
@@ -23,7 +24,11 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import websockets
 
-from pmarb.config import RECONNECT_BASE_SECONDS, RECONNECT_MAX_SECONDS
+from pmarb.config import (
+    RECONNECT_BASE_SECONDS,
+    RECONNECT_MAX_SECONDS,
+    STREAM_IDLE_TIMEOUT_SECONDS,
+)
 from pmarb.credentials import KalshiCredentials
 from pmarb.feeds._util import is_entity as _is_entity
 from pmarb.feeds._util import now_utc as _now_utc
@@ -309,7 +314,8 @@ class KalshiFeed:
         return markets
 
     async def stream_books(
-        self, markets: list[Market], *, reconnect: bool = True
+        self, markets: list[Market], *, reconnect: bool = True,
+        idle_timeout: float = STREAM_IDLE_TIMEOUT_SECONDS,
     ) -> AsyncIterator[Market]:
         """Continuously yield a fresh full-depth Market on every book update.
 
@@ -350,7 +356,22 @@ class KalshiFeed:
                             "market_tickers": tickers,
                         },
                     }))
-                    async for raw in ws:
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(
+                                ws.recv(), timeout=idle_timeout)
+                        except TimeoutError:
+                            # Silence on a socket that never closed. Tear down
+                            # rather than resume: the connection is discarded, so
+                            # the cancelled recv() cannot leave it half-read, and
+                            # resubscribing forces fresh snapshots.
+                            print(f"  WARNING {self.platform} stream silent for "
+                                  f"{idle_timeout:.0f}s — reconnecting")
+                            break
+                        # Stamped BEFORE the parse, so detection latency counts
+                        # every microsecond this process spends on the update
+                        # rather than starting the clock after the easy part.
+                        received_mono = time.monotonic()
                         backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
                         msg = json.loads(raw)
                         typ = msg.get("type")
@@ -388,7 +409,8 @@ class KalshiFeed:
                         }
                         base = meta[ticker]
                         mk = normalize_orderbook(base.raw["market"], ob, _now_utc())
-                        yield replace(mk, event=base.event, futures=base.futures)
+                        yield replace(mk, event=base.event, futures=base.futures,
+                                      received_mono=received_mono)
             # ConnectionClosed = clean/keepalive drop; OSError = network/DNS/reset;
             # TimeoutError = a stalled connect/recv. All are recoverable.
             except (TimeoutError, websockets.ConnectionClosed, OSError):

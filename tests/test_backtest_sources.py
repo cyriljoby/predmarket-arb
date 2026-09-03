@@ -72,6 +72,7 @@ class TestBothSourcesAgree:
         "spread_top": Decimal("0.03000"), "spread_depth": Decimal("0.01100"),
         "spread_fee_adj": Decimal("0.00280"),
         "resolution_date_a": None, "resolution_date_b": None,
+        "detect_latency_ms": Decimal("0.412"), "partner_age_ms": 180,
     }
     LOG_LINE = {
         "timestamp": NOW.isoformat(), "kalshi_market_id": PAIR[0],

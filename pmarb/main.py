@@ -38,6 +38,7 @@ from pmarb.detection.spread import evaluate_pair
 from pmarb.feeds._util import now_utc
 from pmarb.feeds.kalshi import KalshiFeed
 from pmarb.feeds.polymarket import PolymarketUSFeed
+from pmarb.latency import LatencyHistogram
 from pmarb.oplog import LatestOpportunityLog, OpportunityLogger
 
 # Only stream the trustworthy tiers — lexical is noise (see multi-outcome guard).
@@ -166,6 +167,10 @@ async def run(duration: float | None) -> None:
         # pair -> (last append time, last edge, was viable last evaluation)
         last_append: dict[tuple, tuple] = {}
         stats = {"updates": 0, "windows": 0}
+        # Every evaluation, not just the recorded ones: latency is a property of
+        # the pipeline, and sampling it through the log's throttle would measure
+        # the throttle instead.
+        latency = LatencyHistogram()
 
         async def consume(feed, mkts) -> None:
             # The feed's own reconnect loop handles network drops; this outer
@@ -205,6 +210,23 @@ async def run(duration: float | None) -> None:
                     ev = evaluate_pair(k, p, now, require_edge=False)
                     if ev is None:
                         continue
+                    tmono = time.monotonic()
+                    # How long this stack took to SEE the edge: socket receipt
+                    # of the triggering update -> its spread being known.
+                    # Everything in between is ours (parse, book maintenance,
+                    # normalize, depth walk) and nothing outside it is assumed.
+                    detect_ms = (
+                        round((tmono - mk.received_mono) * 1000.0, 3)
+                        if mk.received_mono is not None else None
+                    )
+                    if detect_ms is not None:
+                        latency.observe(detect_ms)
+                    # A hedge is only as fresh as its OLDER leg: this update is
+                    # new, its partner is however old the last message on the
+                    # other venue left it. Measured at the triggering update's
+                    # receipt, so it reports book simultaneity rather than
+                    # re-counting our own compute time.
+                    partner_age_ms = int(partner.age_seconds(now) * 1000.0)
                     # Keyed snapshot: every pair, always (bounded — one line/pair).
                     latest_log.log(ev, match)
                     # Append time series. The sampling rate is ASYMMETRIC on
@@ -228,7 +250,6 @@ async def run(duration: float | None) -> None:
                     is_viable = ev.estimated_fillable_size > 0
                     is_structured = match.get("match_method") == "structured"
                     key = (match["kalshi_id"], match["polymarket_id"])
-                    tmono = time.monotonic()
                     last_t, last_edge, was_viable = last_append.get(
                         key, (0.0, None, False)
                     )
@@ -255,7 +276,8 @@ async def run(duration: float | None) -> None:
                         if writer is not None and pid is not None:
                             writer.submit(to_row(
                                 ev, pid, reason, now,
-                                k.resolution_date, p.resolution_date))
+                                k.resolution_date, p.resolution_date,
+                                detect_ms, partner_age_ms))
                         last_append[key] = (tmono, edge, is_viable)
                         if is_viable and not was_viable:
                             stats["windows"] += 1   # count WINDOWS, not samples
@@ -276,7 +298,8 @@ async def run(duration: float | None) -> None:
                           + (f" FAILED={w.failed}" if w.failed else ""))
                 print(f"  [{time.time() - t0:4.0f}s] updates={stats['updates']:>7} "
                       f"books={len(cache):>5} samples={event_log.count} "
-                      f"windows={stats['windows']} tracked={latest_log.count}{db}")
+                      f"windows={stats['windows']} tracked={latest_log.count}{db} "
+                      f"{latency.summary()}")
 
         tasks = [
             asyncio.create_task(consume(kfeed, k_mkts)),
@@ -302,7 +325,9 @@ async def run(duration: float | None) -> None:
                   f"windows) over {stats['updates']} updates "
                   f"-> {event_log._path} (append, for backtest)\n"
                   f"{latest_log.count} pairs tracked "
-                  f"-> {latest_log._path} (latest snapshot)")
+                  f"-> {latest_log._path} (latest snapshot)\n"
+                  f"detection latency over {latency.count} evaluations: "
+                  f"{latency.summary()}")
 
 
 def main() -> None:

@@ -51,6 +51,13 @@ class Sample:
     fee_yes: float | None = None
     fee_no: float | None = None
 
+    # How long this stack took to see this edge, and how stale the other leg
+    # was when it did. None for any source that predates the instrumentation
+    # (every Phase 1 JSONL row) — which is why the survival curve reports its
+    # own coverage rather than assuming zero.
+    detect_latency_ms: float | None = None
+    partner_age_ms: int | None = None
+
     # Captured per observation, never joined from `market`, because venues amend
     # settlement dates (a postponed game is rewritten) and a later join would
     # silently restate every historical holding period.

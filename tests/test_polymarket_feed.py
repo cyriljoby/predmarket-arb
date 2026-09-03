@@ -11,6 +11,9 @@ from pmarb.feeds.polymarket import (
 from pmarb.models import PriceLevel
 
 OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=UTC)
+# Sentinel for "the venue stops sending but never closes the socket" — the
+# failure that cost the 30-day run 15.1h in one stretch.
+_SILENCE = object()
 MARKET = {
     "slug": "tec-mlb-nlchamp",
     "question": "National League Champion",
@@ -167,15 +170,15 @@ class TestStreamBooks:
         async def send(self, m):
             self.sent.append(m)
 
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
+        async def recv(self):
             import websockets
             try:
-                return next(self._it)
+                msg = next(self._it)
             except StopIteration:  # end the stream
                 raise websockets.ConnectionClosed(None, None) from None
+            if msg is _SILENCE:
+                await asyncio.sleep(3600)   # never arrives; the read must time out
+            return msg
 
     class _FakeConnect:
         def __init__(self, ws):
@@ -225,3 +228,79 @@ class TestStreamBooks:
         # one subscribe message sent, carrying the slug
         assert len(ws.sent) == 1
         assert json.loads(ws.sent[0])["subscribe"]["marketSlugs"] == ["slug-a"]
+
+    def test_every_streamed_book_carries_its_receipt_instant(self, monkeypatch):
+        # Detection latency is measured from this stamp. A book that arrives
+        # without one is invisible to the survival curve, and a stamp taken
+        # after the parse would quietly exclude the parse from the measurement.
+        import json
+        import time
+
+        import websockets
+
+        from pmarb.feeds import polymarket as pmod
+
+        meta = {**MARKET, "slug": "slug-a"}
+        market = pmod._market_metadata(meta, OBSERVED)
+        ws = self._FakeWS([
+            json.dumps({"marketData": {"marketSlug": "slug-a", **MARKET_DATA}}),
+        ])
+        monkeypatch.setattr(pmod.websockets, "connect",
+                            lambda *a, **k: self._FakeConnect(ws))
+        monkeypatch.setattr(pmod, "polymarket_us_headers", lambda *a, **k: {})
+        feed = PolymarketUSFeed.__new__(PolymarketUSFeed)
+        feed._creds = None
+
+        async def collect():
+            out = []
+            try:
+                async for m in feed.stream_books([market], reconnect=False):
+                    out.append(m)
+            except websockets.ConnectionClosed:
+                pass
+            return out
+
+        before = time.monotonic()
+        out = asyncio.run(collect())
+        after = time.monotonic()
+        assert out[0].received_mono is not None
+        assert before <= out[0].received_mono <= after
+
+    def test_a_silent_socket_is_torn_down_and_resubscribed(self, monkeypatch):
+        # The 30-day run's dominant failure: the host suspends, the socket goes
+        # half-open, and on wake the read blocks on a connection nothing will
+        # ever write to again. Nothing raises, so the reconnect handler never
+        # fires. Only the ABSENCE of data reveals it.
+        import json
+
+        import websockets
+
+        from pmarb.feeds import polymarket as pmod
+
+        meta = {**MARKET, "slug": "slug-a"}
+        market = pmod._market_metadata(meta, OBSERVED)
+        ws = self._FakeWS([
+            json.dumps({"marketData": {"marketSlug": "slug-a", **MARKET_DATA}}),
+            _SILENCE,
+        ])
+        monkeypatch.setattr(pmod.websockets, "connect",
+                            lambda *a, **k: self._FakeConnect(ws))
+        monkeypatch.setattr(pmod, "polymarket_us_headers", lambda *a, **k: {})
+
+        feed = PolymarketUSFeed.__new__(PolymarketUSFeed)
+        feed._creds = None
+
+        async def collect():
+            out = []
+            try:
+                async for m in feed.stream_books([market], reconnect=False,
+                                                 idle_timeout=0.05):
+                    out.append(m)
+            except websockets.ConnectionClosed:
+                pass
+            return out
+
+        out = asyncio.run(collect())
+        assert len(out) == 1                  # the message before the silence
+        # and it reconnected rather than hanging: every slug resubscribed.
+        assert len(ws.sent) == 2

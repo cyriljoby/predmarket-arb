@@ -52,11 +52,21 @@ class TestRowMapping:
         assert row[2] == 2                  # sample_reason
         assert row[3] == "kalshi"           # yes_venue
         assert row[13] == 47                # fillable_size
-        assert row[-2:] == ("A", "B")       # both resolution dates
+        assert row[20:22] == ("A", "B")     # both resolution dates
 
     def test_frontier_lands_in_its_six_columns(self):
         row = to_row(EV, 1, 0, "T", None, None)
         assert row[14:20] == (12, 0.0091, 24, 0.0060, 36, 0.0041)
+
+    def test_latency_is_recorded_per_observation(self):
+        row = to_row(EV, 1, 2, "T", None, None, 0.412, 180)
+        assert row[-2:] == (0.412, 180)
+
+    def test_unmeasured_latency_is_null_not_zero(self):
+        # A row with no receipt instant (REST snapshot, replay) must not read
+        # as instantaneous detection.
+        row = to_row(EV, 1, 2, "T", None, None)
+        assert row[-2:] == (None, None)
 
     def test_missing_frontier_is_null_not_zero(self):
         # A zero edge at p25 would read as "measured and flat" rather than

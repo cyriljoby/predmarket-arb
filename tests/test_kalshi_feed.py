@@ -7,6 +7,9 @@ from pmarb.feeds.kalshi import KalshiFeed, _asks_from_bids, normalize_orderbook
 from pmarb.models import PriceLevel
 
 OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=UTC)
+# Sentinel for "the venue stops sending but never closes the socket" — the
+# failure that cost the 30-day run 15.1h in one stretch.
+_SILENCE = object()
 MARKET = {
     "ticker": "TEST-1",
     "title": "Will X happen?",
@@ -137,15 +140,15 @@ class TestStreamBooks:
         async def send(self, m):
             self.sent.append(m)
 
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
+        async def recv(self):
             import websockets
             try:
-                return next(self._it)
+                msg = next(self._it)
             except StopIteration:
                 raise websockets.ConnectionClosed(None, None) from None
+            if msg is _SILENCE:
+                await asyncio.sleep(3600)   # never arrives; the read must time out
+            return msg
 
     class _FakeConnect:
         def __init__(self, ws):
@@ -157,7 +160,7 @@ class TestStreamBooks:
         async def __aexit__(self, *a):
             return False
 
-    def _run(self, monkeypatch, messages):
+    def _run(self, monkeypatch, messages, idle_timeout=180.0):
         import json
 
         import websockets
@@ -168,7 +171,9 @@ class TestStreamBooks:
             {"ticker": "T", "title": "Q", "close_time": "2026-09-01T00:00:00Z"},
             OBSERVED,
         )
-        ws = self._FakeWS([json.dumps(m) for m in messages])
+        ws = self._FakeWS([m if m is _SILENCE else json.dumps(m)
+                           for m in messages])
+        self._ws_after_run = ws   # so a test can assert on what was re-sent
         monkeypatch.setattr(kmod.websockets, "connect",
                             lambda *a, **k: self._FakeConnect(ws))
         monkeypatch.setattr(kmod, "kalshi_headers", lambda *a, **k: {})
@@ -178,7 +183,8 @@ class TestStreamBooks:
         async def collect():
             out = []
             try:
-                async for m in feed.stream_books([market], reconnect=False):
+                async for m in feed.stream_books([market], reconnect=False,
+                                                 idle_timeout=idle_timeout):
                     out.append(m)
             except websockets.ConnectionClosed:
                 pass
@@ -220,6 +226,39 @@ class TestStreamBooks:
         ])
         assert out[0].yes_depth[0].size == 40.0
         assert out[1].yes_depth == ()  # level removed -> empty ask ladder
+
+    def test_every_streamed_book_carries_its_receipt_instant(self, monkeypatch):
+        # Detection latency is measured from this stamp. A book that arrives
+        # without one is invisible to the survival curve, and a stamp taken
+        # after the parse would quietly exclude the parse from the measurement.
+        import time
+        before = time.monotonic()
+        out = self._run(monkeypatch, [
+            {"type": "orderbook_snapshot", "seq": 1, "msg": {
+                "market_ticker": "T",
+                "yes_dollars_fp": [["0.60", "100.0"]], "no_dollars_fp": [],
+            }},
+        ])
+        after = time.monotonic()
+        assert out[0].received_mono is not None
+        assert before <= out[0].received_mono <= after
+
+    def test_a_silent_socket_is_torn_down_and_resubscribed(self, monkeypatch):
+        # The 30-day run's dominant failure: the host suspends, the sockets go
+        # half-open, and on wake the read blocks on a connection nothing will
+        # ever write to again. Nothing raises, so the reconnect handler below
+        # never fires. Only the ABSENCE of data reveals it.
+        out = self._run(monkeypatch, [
+            {"type": "orderbook_snapshot", "seq": 1, "msg": {
+                "market_ticker": "T",
+                "yes_dollars_fp": [], "no_dollars_fp": [["0.30", "40.0"]],
+            }},
+            _SILENCE,
+        ], idle_timeout=0.05)
+        assert len(out) == 1                      # the pre-silence snapshot
+        # and the stream did not simply end: it reconnected and resubscribed,
+        # which is what forces fresh snapshots after a gap.
+        assert len(self._ws_after_run.sent) == 2
 
     def test_seq_gap_stops_the_stream(self, monkeypatch):
         # snapshot seq=1, then a delta at seq=5 (gap) -> break before yielding it

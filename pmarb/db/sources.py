@@ -38,6 +38,8 @@ def _to_sample(r: dict) -> Sample:
         ask_top_yes=_f(r["yes_ask_top"]), ask_top_no=_f(r["no_ask_top"]),
         fill_yes=_f(r["yes_fill_price"]), fill_no=_f(r["no_fill_price"]),
         fee_yes=_f(r["yes_fee"]), fee_no=_f(r["no_fee"]),
+        detect_latency_ms=_f(r["detect_latency_ms"]),
+        partner_age_ms=r["partner_age_ms"],
         resolution_date_a=r["resolution_date_a"],
         resolution_date_b=r["resolution_date_b"],
     )

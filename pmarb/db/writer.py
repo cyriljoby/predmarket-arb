@@ -27,9 +27,10 @@ _INSERT = """
         fillable_size,
         size_at_p25, edge_at_p25, size_at_p50, edge_at_p50,
         size_at_p75, edge_at_p75,
-        resolution_date_a, resolution_date_b)
+        resolution_date_a, resolution_date_b,
+        detect_latency_ms, partner_age_ms)
     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,%s,%s,%s)
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     ON CONFLICT (match_pair_id, observed_at) DO NOTHING
 """
 
@@ -130,8 +131,15 @@ def _frontier_cells(frontier) -> tuple:
 
 
 def to_row(ev, match_pair_id: int, reason: int, observed_at: datetime,
-           resolution_a: datetime | None, resolution_b: datetime | None) -> tuple:
-    """Map a PairEvaluation onto the observation column order."""
+           resolution_a: datetime | None, resolution_b: datetime | None,
+           detect_latency_ms: float | None = None,
+           partner_age_ms: int | None = None) -> tuple:
+    """Map a PairEvaluation onto the observation column order.
+
+    The two latency figures are per-observation, not per-run: they are what the
+    survival curve joins against, so an average would answer a different
+    question than "was the edge still there when THIS detection landed".
+    """
     return (
         match_pair_id, observed_at, reason, ev.yes_platform,
         ev.yes_ask_top, ev.no_ask_top, ev.yes_fill_price, ev.no_fill_price,
@@ -140,4 +148,5 @@ def to_row(ev, match_pair_id: int, reason: int, observed_at: datetime,
         ev.fee_adjusted_spread, ev.estimated_fillable_size,
         *_frontier_cells(ev.frontier),
         resolution_a, resolution_b,
+        detect_latency_ms, partner_age_ms,
     )

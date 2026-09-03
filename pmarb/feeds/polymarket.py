@@ -16,13 +16,19 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import datetime
 
 import aiohttp
 import websockets
 
-from pmarb.config import RECONNECT_BASE_SECONDS, RECONNECT_MAX_SECONDS
+from pmarb.config import (
+    RECONNECT_BASE_SECONDS,
+    RECONNECT_MAX_SECONDS,
+    STREAM_IDLE_TIMEOUT_SECONDS,
+)
 from pmarb.credentials import PolymarketUSCredentials
 from pmarb.feeds._util import is_entity, now_utc, parse_iso_dt
 from pmarb.feeds.auth import polymarket_us_headers
@@ -272,7 +278,8 @@ class PolymarketUSFeed:
     _SUB_BATCH = 200  # max marketSlugs per subscribe message
 
     async def stream_books(
-        self, markets: list[Market], *, reconnect: bool = True
+        self, markets: list[Market], *, reconnect: bool = True,
+        idle_timeout: float = STREAM_IDLE_TIMEOUT_SECONDS,
     ) -> AsyncIterator[Market]:
         """Continuously yield a fresh full-depth Market on every book update.
 
@@ -309,13 +316,31 @@ class PolymarketUSFeed:
                             "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
                             "marketSlugs": slugs[i:i + self._SUB_BATCH],
                         }}))
-                    async for raw in ws:
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(
+                                ws.recv(), timeout=idle_timeout)
+                        except TimeoutError:
+                            # Silence on a socket that never closed. Tear down
+                            # rather than resume: the connection is discarded, so
+                            # the cancelled recv() cannot leave it half-read, and
+                            # reconnecting resubscribes every slug.
+                            print(f"  WARNING {self.platform} stream silent for "
+                                  f"{idle_timeout:.0f}s — reconnecting")
+                            break
+                        # Stamped BEFORE the parse, so detection latency counts
+                        # every microsecond this process spends on the update
+                        # rather than starting the clock after the easy part.
+                        received_mono = time.monotonic()
                         backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
                         md = json.loads(raw).get("marketData")
                         slug = md.get("marketSlug") if md else None
                         if slug in meta_by_slug:
-                            yield normalize_market_data(
-                                meta_by_slug[slug], md, now_utc()
+                            yield replace(
+                                normalize_market_data(
+                                    meta_by_slug[slug], md, now_utc()
+                                ),
+                                received_mono=received_mono,
                             )
             # ConnectionClosed = clean/keepalive drop; OSError = network/DNS/reset;
             # TimeoutError = a stalled connect/recv. All are recoverable.

@@ -35,6 +35,20 @@ MAX_LEG_STALENESS_SECONDS = 2.0
 RECONNECT_BASE_SECONDS = 1.0     # WS reconnect backoff start (doubles per failure)
 RECONNECT_MAX_SECONDS = 30.0     # WS reconnect backoff cap
 
+# Longest silence tolerated on an open socket before treating it as dead.
+#
+# A venue can stop sending while the connection stays perfectly healthy — no
+# close frame, no error, pings still answered — and an unbounded read waits on
+# it forever. The 30-day run lost 15.1h, 12.6h and 11.9h that way, ingesting
+# nothing while the process looked fine. No transport-level keepalive detects
+# this; only the absence of DATA does.
+#
+# The tradeoff is resnapshot cost: a reconnect makes Kalshi resend ~3,000 book
+# snapshots, so too low a value trades a rare stall for constant churn. Three
+# minutes is far below the observed stalls (hours) and far above any plausible
+# quiet period at ~930 updates/sec.
+STREAM_IDLE_TIMEOUT_SECONDS = 180.0
+
 # Output Paths
 LOG_PATH = "opportunities.jsonl"              # append-only event log (backtest)
 LATEST_LOG_PATH = "opportunities_latest.jsonl"  # keyed snapshot, one line per open pair

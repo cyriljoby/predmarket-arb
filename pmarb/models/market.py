@@ -94,6 +94,13 @@ class Market:
     # or unstructured (both None -> lexical matcher).
     event: SportsEvent | None = None     # head-to-head game (moneyline markets)
     futures: FuturesEvent | None = None  # entity-outright (winner/next/appointment)
+    # Monotonic clock reading taken the instant this update's bytes came off the
+    # socket, before any parsing. Paired with a second reading after detection,
+    # it measures how long this stack takes to see an edge — the Δ the
+    # window-survival question needs. MONOTONIC, not wall-clock: only
+    # differences are ever taken, and NTP steps must not appear as latency.
+    # None on REST/metadata snapshots, which never came off a stream.
+    received_mono: float | None = None
 
     @property
     def yes_ask(self) -> float | None:
