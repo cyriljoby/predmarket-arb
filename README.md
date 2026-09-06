@@ -226,6 +226,111 @@ attached as data rather than as prose someone has to remember.
 
 ---
 
+## Key findings: wire realities and bugs surfaced
+
+Most of the work in this project has not been algorithmic. It has been finding
+out what the two venues actually send, and catching the failures that look like
+nothing. The pattern worth naming: **the dangerous bugs here are all silent** —
+a dropped subscription, a mis-classified market, an inverted hedge and an idle
+market all produce the same thing in a log, which is nothing.
+
+Recorded so the next person does not rediscover them by accident.
+
+### Silent losses
+
+- **Polymarket caps subscriptions at 2,000 per connection.** The 2,001st is
+  refused with `{"error": "max subscriptions per connection reached"}`; the
+  socket stays healthy and the extra batches are simply never fed. Because the
+  read loop only looked at `marketData` frames, a run subscribing to 8,082
+  markets streamed 2,000 of them and reported nothing wrong for 2.5 hours.
+  Fixed by sharding across connections (1,900 each) and by logging error
+  frames. **Note the 30-day run streamed "~2,040 simultaneous books"** — close
+  enough to the cap that its coverage may have been truncated too, which would
+  make its denominators floors rather than measurements.
+
+- **Kalshi player props were classified as outrights.** Their subject reads
+  "Cal Raleigh: 2+", which the entity extractor accepted, so all 6,331 were
+  offered to the futures matcher — where they matched nothing, because Poly's
+  props are not outright-shaped. The largest matchable block on either venue
+  looked empty from both directions for months.
+
+- **Polymarket names college-football teams by MASCOT** (`team.name` =
+  "Bulldogs") while the school is in `safeName` ("The Citadel"). Kalshi names
+  the school. Zero shared tokens, so 176 CFB games matched nothing — silently,
+  because an unmatched pair writes no row anywhere. Fixing it added 148 pairs.
+
+- **A season written as a range left a stray number.** "2026-27" stripped to
+  "27", which the futures matcher reads as a sub-event selector ("Stage 9"),
+  hard-zeroing the score against any competition without the same stray digits.
+  It rejected correct pairs across every season-range sport.
+
+### Things that would have priced a phantom hedge
+
+- **Half of Polymarket's spread inventory is the opposite side.** Kalshi always
+  writes the laying side ("Vanderbilt wins by over 41.5"); Poly writes one
+  market per (game, line) and quotes either side — 4,046 groups favorite-side,
+  4,477 underdog-side, never both. So on ~half the inventory Poly's YES is the
+  COMPLEMENT of Kalshi's YES, and pairing them naively buys the same event on
+  both venues while reporting a hedge. Carried as `poly_inverted`.
+
+- **Sub-period contracts look identical to full-game ones.** First-half totals,
+  quarter spreads, team totals, first-five-innings markets. Poly's
+  `football_team_points_full_game_total` even contains "full_game" and is a
+  per-TEAM total. Both sides are now allowlisted rather than pattern-matched.
+
+- **"Kansas" is a subset of "Kansas St." and they are different schools.** The
+  name-subset rule that correctly pairs "Houston" with "Houston Astros" made
+  Kansas State the highest-edge "arb" in one match set. Discriminator tokens
+  (`state`, `tech`, `saint`, directional prefixes) now refuse the subset.
+
+- **20 of 47 review-rejected pairs were matched perfectly.** Same game, same
+  side, start times to the minute — and still not hedges, because NPB games
+  tie, NFL preseason has no overtime, ITF walkovers settle differently, and F1
+  re-points a fastest-lap market at a substitute driver. Matching quality
+  cannot fix these; see `matching/hazards.py`.
+
+### Encoding traps
+
+- **Kalshi writes a prop threshold twice** — `"15+"` in `yes_sub_title` and
+  `floor_strike: 14.5` (half-point, `strike_type: greater`). Poly writes
+  `line: 15`, gte. One number, three encodings. The extractor reads both Kalshi
+  forms and refuses the market if they disagree, which turns a wire-format
+  change into a loud failure instead of a wrong contract.
+
+- **Venue ID abbreviations do not correspond.** Kalshi's `26SEP12DELVAN`
+  against Poly's `boscol-cin`: an early overlap estimate that compared them was
+  measuring abbreviation schemes, not games. Matching goes through parsed
+  fields, never through ids.
+
+- **Kalshi encodes game times in US Eastern** inside the event ticker; Poly's
+  `gameStartTime` is UTC. Weekly sports omit the time entirely and parse to
+  midnight Eastern, which is why the start-time window is 30h rather than tight.
+
+- **Settlement dates are padded differently** (Kalshi ~+3d, Poly ~+14d after a
+  game), so resolution-date proximity must NOT gate game matches. Venues also
+  AMEND them — a postponed game is rewritten — which is why observations
+  snapshot their own copy instead of joining `market` later.
+
+- **Kalshi's `rules_primary` is sometimes an unfilled template**
+  (`"above || Count || by || Date ||"`), so venue rules text cannot be relied
+  on for settlement comparison.
+
+### Operational
+
+
+- **Polymarket halts and re-lists markets intraday.** The catalog swung
+  63,530 → 48,718 markets within hours, and NFL player props went
+  `MARKET_STATUS_HALTED` five days before kickoff. Match counts move between
+  runs for this reason, not because the matchers are unstable — quote the
+  frozen-catalog verifications instead.
+
+- **A loud failure is worth keeping loud.** Seeding rejected the first `line`
+  pair outright because `match_pair`'s CHECK constraint predated the new
+  matchers. That is the constraint working: had it been widened to any text,
+  6,100 pairs would have been dropped silently.
+
+---
+
 ## Results so far
 
 A 30-day continuous run (2026-07-18 → 2026-08-17): 96.9M book updates, ~2,040

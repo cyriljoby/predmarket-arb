@@ -505,12 +505,64 @@ class PolymarketUSFeed:
         return markets
 
     _SUB_BATCH = 200  # max marketSlugs per subscribe message
+    # HARD VENUE LIMIT, discovered live: the 2001st subscription on a
+    # connection is refused with {"error": "max subscriptions per connection
+    # reached"}. Asking for more does not fail the socket — the extra batches
+    # are simply rejected, and a reader that only looks at `marketData` frames
+    # (as this one did) sees silence indistinguishable from an idle market.
+    # A run with 8,082 Poly markets therefore streamed 2,000 of them and
+    # reported nothing wrong for two hours.
+    #
+    # Margin below the cap because the venue counts subscriptions, not markets,
+    # and a reconnect can briefly overlap the old ones.
+    _MAX_SUBS_PER_CONN = 1_900
 
     async def stream_books(
         self, markets: list[Market], *, reconnect: bool = True,
         idle_timeout: float = STREAM_IDLE_TIMEOUT_SECONDS,
     ) -> AsyncIterator[Market]:
-        """Continuously yield a fresh full-depth Market on every book update.
+        """Yield a fresh full-depth Market on every book update, across as many
+        connections as the subscription cap requires.
+
+        One connection holds at most `_MAX_SUBS_PER_CONN` markets, so a large
+        match set is sharded and the shards are merged into one stream. Each
+        shard reconnects independently: a drop costs that shard's books until it
+        recovers, not the whole feed.
+        """
+        shards = [markets[i:i + self._MAX_SUBS_PER_CONN]
+                  for i in range(0, len(markets), self._MAX_SUBS_PER_CONN)]
+        if len(shards) <= 1:
+            async for mk in self._stream_shard(
+                    markets, reconnect=reconnect, idle_timeout=idle_timeout):
+                yield mk
+            return
+
+        print(f"  {self.platform}: {len(markets)} markets over {len(shards)} "
+              f"connections (cap {self._MAX_SUBS_PER_CONN}/conn)")
+        # Bounded: an unbounded queue would trade a silent subscription loss for
+        # a silent memory leak. Poly sends full snapshots, so a dropped update is
+        # superseded by the next one and the staleness gate covers the gap.
+        queue: asyncio.Queue[Market] = asyncio.Queue(maxsize=10_000)
+
+        async def pump(shard: list[Market]) -> None:
+            async for mk in self._stream_shard(
+                    shard, reconnect=reconnect, idle_timeout=idle_timeout):
+                await queue.put(mk)
+
+        tasks = [asyncio.create_task(pump(sh)) for sh in shards]
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            for t in tasks:
+                t.cancel()
+
+    async def _stream_shard(
+        self, markets: list[Market], *, reconnect: bool = True,
+        idle_timeout: float = STREAM_IDLE_TIMEOUT_SECONDS,
+    ) -> AsyncIterator[Market]:
+        """One connection's worth of books. Continuously yield a fresh
+        full-depth Market on every book update.
 
         Holds ONE authenticated socket open, subscribes to every market's slug
         (batched by `_SUB_BATCH`), and yields a normalized Market per
@@ -562,7 +614,14 @@ class PolymarketUSFeed:
                         # rather than starting the clock after the easy part.
                         received_mono = time.monotonic()
                         backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
-                        md = json.loads(raw).get("marketData")
+                        payload = json.loads(raw)
+                        md = payload.get("marketData")
+                        if md is None and "error" in payload:
+                            # The frame that made a 75% subscription loss look
+                            # like an idle market. Never swallow it again.
+                            print(f"  WARNING {self.platform} subscribe error: "
+                                  f"{payload['error']}")
+                            continue
                         slug = md.get("marketSlug") if md else None
                         if slug in meta_by_slug:
                             yield replace(
