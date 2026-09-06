@@ -42,6 +42,12 @@ _STATED_YEAR_RE = re.compile(r"\b(20[2-4]\d)\b")
 # editions are separated by `same_period` instead.
 _COMP_STOP = frozenset("the a an of to be who will in".split())
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+# A season written as a range ("2026-27 Serie A", "2026-2027 NBA MVP"). Stripped
+# BEFORE _YEAR_RE, which would otherwise remove only the leading year and leave
+# a bare "27" behind — and a bare number is read as a sub-event selector, which
+# hard-zeroes the score against any competition not carrying the same stray
+# digits. That silently rejected correct pairs across every season-range sport.
+_SEASON_RANGE_RE = re.compile(r"\b(19|20)\d{2}\s*[-/\u2013]\s*(\d{4}|\d{2})\b")
 _TIE_MARGIN = 1e-9
 
 # Sub-event selectors: words that pick out ONE contract within a competition
@@ -73,7 +79,8 @@ def competition_tokens(text: str) -> frozenset[str]:
     Numbers are KEPT (a stage/round number is load-bearing); only single-letter
     tokens and grammatical filler are dropped.
     """
-    text = _YEAR_RE.sub(" ", text.lower())
+    text = _SEASON_RANGE_RE.sub(" ", text.lower())
+    text = _YEAR_RE.sub(" ", text)
     return frozenset(
         t for t in _TOKEN_RE.findall(text)
         if (len(t) > 1 or t.isdigit()) and t not in _COMP_STOP

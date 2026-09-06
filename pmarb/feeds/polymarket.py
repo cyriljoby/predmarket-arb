@@ -32,7 +32,14 @@ from pmarb.config import (
 from pmarb.credentials import PolymarketUSCredentials
 from pmarb.feeds._util import is_entity, now_utc, parse_iso_dt
 from pmarb.feeds.auth import polymarket_us_headers
-from pmarb.models import FuturesEvent, Market, PriceLevel, SportsEvent
+from pmarb.models import (
+    FuturesEvent,
+    LineEvent,
+    Market,
+    PriceLevel,
+    PropEvent,
+    SportsEvent,
+)
 
 _GATEWAY = "https://gateway.polymarket.us"
 _WS_URL = "wss://api.polymarket.us/v1/ws/markets"
@@ -72,6 +79,35 @@ def _match_question(market: dict) -> str:
     return first or market.get("question", "")
 
 
+def _team_name(team: dict) -> str:
+    """The fullest name Poly gives for a competitor.
+
+    Two fields carry it and neither is reliably the complete one. In college
+    football `name` is the MASCOT ("Bulldogs") while `safeName` is the SCHOOL
+    ("The Citadel") — and Kalshi names the school, so the mascot alone shares
+    no token with it and the games cannot align at all. Elsewhere one contains
+    the other ("Atlanta Braves"/"Braves", "Detroit Lions"/"Detroit"), where
+    either alone already matches.
+
+    So the two are joined only when neither contains the other, which is
+    exactly the mascot-vs-school case. Joining unconditionally would duplicate
+    tokens on every other league for nothing.
+    """
+    name = (team.get("name") or "").strip()
+    safe = (team.get("safeName") or "").strip()
+    if not safe or safe.lower() == name.lower():
+        return name
+    # Containment is checked on plain lowercase words rather than by importing
+    # the matcher's tokenizer: a feed must not depend on the matching layer.
+    # The two only need to agree on "is one of these a subset of the other",
+    # which accent folding and single-char dropping do not change.
+    n = frozenset(re.findall(r"[a-z0-9]+", name.lower()))
+    sf = frozenset(re.findall(r"[a-z0-9]+", safe.lower()))
+    if n <= sf or sf <= n:
+        return name if len(n) >= len(sf) else safe
+    return f"{safe} {name}"
+
+
 def _sports_event(market: dict) -> SportsEvent | None:
     """Structured game identity for a moneyline market, or None.
 
@@ -98,9 +134,179 @@ def _sports_event(market: dict) -> SportsEvent | None:
     return SportsEvent(
         league=league,
         start_time=parse_iso_dt(market.get("gameStartTime")),
-        competitors=(teams[0]["name"], teams[1]["name"]),
-        yes_competitor=long_team.get("name", ""),
+        competitors=(_team_name(teams[0]), _team_name(teams[1])),
+        yes_competitor=_team_name(long_team),
         yes_abbrev=(long_team.get("abbreviation") or "").lower(),
+    )
+
+
+# The two team names in a totals description. Totals carry NO team objects
+# (`team` is null on all 19,344 sides), and their question uses mascots
+# ("Eagles vs. Bearcats"), which share no token with Kalshi's school names.
+# The description is the only place the full names appear, and it is present
+# on 100% of them.
+_TOTAL_TEAMS_RE = re.compile(
+    r"\bif\s+(?P<a>.+?)\s+and\s+(?P<b>.+?)\s+(?:combine for|score)\b",
+    re.IGNORECASE,
+)
+
+
+# The ONLY shapes that are a whole-game line. Poly slices every game into
+# halves, quarters, and (baseball) the first five innings, and each slice is a
+# separate contract — a first-half total paired with a full-game total is the
+# same error as pairing "Stage 9" with the overall race. An allowlist rather
+# than a "full_game" substring test, because `football_team_points_full_game_
+# total` contains it and is a TEAM total (one team's points), which Kalshi
+# lists under its own series and which this matcher does not cover.
+_FULL_GAME_LINE_TYPES = frozenset({
+    "football_team_full_game_spread", "football_team_full_game_total",
+    "soccer_team_full_game_spread", "soccer_team_full_game_total",
+    "baseball_team_full_game_spread", "baseball_team_full_game_total",
+})
+
+
+# Poly player-prop types -> the shared stat vocabulary (see the Kalshi feed's
+# _PROP_SERIES; the two must name the same stats or nothing matches).
+_PROP_TYPES = {
+    "baseball_player_total_bases": ("mlb", "total_bases"),
+    "baseball_player_hits_runs_rbis": ("mlb", "hits_runs_rbis"),
+    "baseball_player_hits": ("mlb", "hits"),
+    "baseball_player_home_runs": ("mlb", "home_runs"),
+    "baseball_player_rbis": ("mlb", "rbis"),
+    "football_player_receiving_yards": ("nfl", "receiving_yards"),
+    "football_player_receptions": ("nfl", "receptions"),
+    "football_player_rush_yards": ("nfl", "rush_yards"),
+    "football_player_pass_yards": ("nfl", "pass_yards"),
+    "football_player_touchdowns": ("nfl", "touchdowns"),
+    "baseball_player_strikeouts": ("mlb", "strikeouts"),
+    "baseball_player_hits_allowed": ("mlb", "hits_allowed"),
+    "baseball_player_earned_runs_allowed": ("mlb", "earned_runs_allowed"),
+    "baseball_player_walks_allowed": ("mlb", "walks_allowed"),
+}
+
+# "... in the Milwaukee Brewers vs Cincinnati Reds MLB game scheduled for ..."
+# The trailing league/sport words are trimmed off the second team.
+_PROP_GAME_RE = re.compile(
+    r"\bin the (?P<a>.+?) vs\.? (?P<b>.+?)\s+"
+    r"(?:MLB|NFL|NBA|NHL|professional football|professional baseball)\b",
+    re.IGNORECASE,
+)
+
+
+def _prop_event(market: dict) -> PropEvent | None:
+    """Player-prop identity for a Poly US market, or None.
+
+    Poly states all four facts plainly: `title` is the player, `line` is the
+    threshold, `sportsMarketType` is the stat, and the description names the
+    game. YES is "at least `line`", the same rung Kalshi writes as "N+".
+    """
+    mapped = _PROP_TYPES.get(market.get("sportsMarketType"))
+    if mapped is None or market.get("line") is None:
+        return None
+    league, stat = mapped
+    player = (market.get("title") or "").strip()
+    gs = parse_iso_dt(market.get("gameStartTime"))
+    if not player or gs is None:
+        return None
+    sides = market.get("marketSides") or []
+    longs = [x for x in sides if x.get("long")]
+    # YES must be the "at least" side. Anything else and the contract is not
+    # the one Kalshi writes.
+    if len(sides) != 2 or len(longs) != 1 or \
+            (longs[0].get("description") or "").strip().lower() != "yes":
+        return None
+    m = _PROP_GAME_RE.search(market.get("description") or "")
+    if m is None:
+        return None
+    competitors = tuple(
+        re.sub(r"^the\s+", "", x.strip(), flags=re.IGNORECASE)
+        for x in (m["a"], m["b"])
+    )
+    if not all(competitors):
+        return None
+    return PropEvent(
+        league=league,
+        start_time=gs,
+        competitors=competitors,
+        player=player,
+        stat=stat,
+        threshold=float(market["line"]),
+    )
+
+
+def _line_event(market: dict) -> LineEvent | None:
+    """Spread/total identity for a Poly US market, or None.
+
+    Two shapes, and they differ in where the teams live:
+
+      spreads — full `team` objects on BOTH sides (23,712/23,712 sides), so
+        this reuses `_team_name` exactly as moneylines do. The long side's
+        description carries the sign ("-4.50" / "+4.50") and the long team is
+        the one YES pays on covering.
+
+      totals — no team objects at all. Names come from the description prose,
+        and YES is Over (the long side was "Over" on all 9,672 sampled).
+
+    `line` is the venue's own numeric field, kept as an absolute value; which
+    side of it YES sits on is carried by `yes_team` (spreads) or by kind
+    (totals), never by the sign of this number.
+    """
+    kind = {"spreads": "spread", "totals": "total"}.get(market.get("marketType"))
+    if kind is None or market.get("line") is None:
+        return None
+    if market.get("sportsMarketType") not in _FULL_GAME_LINE_TYPES:
+        return None
+    gs = parse_iso_dt(market.get("gameStartTime"))
+    slug_parts = market.get("slug", "").split("-")
+    league = slug_parts[1] if len(slug_parts) > 2 else ""
+    if not league or gs is None:
+        return None
+    sides = market.get("marketSides") or []
+    longs = [x for x in sides if x.get("long")]
+    if len(sides) != 2 or len(longs) != 1:
+        return None
+
+    yes_favored = True
+    if kind == "spread":
+        teams = [x.get("team") or {} for x in sides]
+        if not all(t.get("name") for t in teams):
+            return None
+        competitors = (_team_name(teams[0]), _team_name(teams[1]))
+        yes_team = _team_name(longs[0].get("team") or {})
+        # "-4.50" = the long team lays the points; "+4.50" = it receives them.
+        desc = (longs[0].get("description") or "").strip()
+        if desc.startswith("-"):
+            yes_favored = True
+        elif desc.startswith("+"):
+            yes_favored = False
+        else:
+            return None   # unsigned side — the contract is unknown, refuse it
+    else:
+        m = _TOTAL_TEAMS_RE.search(market.get("description") or "")
+        if m is None:
+            return None  # a phrasing this parser does not know — never guess
+        # "settles Yes if the Arizona Diamondbacks and Houston Astros
+        # combine..." — the article is part of the sentence, not the name, and
+        # it survives tokenization (3 chars), depressing every subset score.
+        competitors = tuple(
+            re.sub(r"^the\s+", "", x.strip(), flags=re.IGNORECASE)
+            for x in (m["a"], m["b"])
+        )
+        # Over/Under rather than a team; refuse anything else rather than
+        # assume the long side means Over.
+        if (longs[0].get("description") or "").strip().lower() != "over":
+            return None
+        yes_team = ""
+    if not all(competitors):
+        return None
+    return LineEvent(
+        league=league.lower(),
+        start_time=gs,
+        competitors=competitors,
+        kind=kind,
+        line=abs(float(market["line"])),
+        yes_team=yes_team,
+        yes_favored=yes_favored,
     )
 
 
@@ -126,7 +332,8 @@ def _futures_event(market: dict) -> FuturesEvent | None:
 
 
 def _questions(
-    market: dict, event: SportsEvent | None = None
+    market: dict, event: SportsEvent | None = None,
+    line: LineEvent | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     """The primary matching question plus any alias phrasings.
 
@@ -143,6 +350,20 @@ def _questions(
     if event is not None:
         a, b = event.competitors
         question = f"Will {event.yes_competitor} win {a} vs. {b}?"
+        return question, (raw_q,) if raw_q else ()
+    if line is not None:
+        # Poly's own question narrates whichever side it likes — for
+        # asc-nfl-den-kc-...-pos-5pt5 it reads "Kansas City Chiefs wins by more
+        # than 5.5" while the quoted (long) side is DENVER +5.5. A reviewer
+        # reading that question would check the wrong contract, so the primary
+        # is synthesized to say what YES actually pays on.
+        a, b = line.competitors
+        if line.kind == "total":
+            question = f"Will the total in {a} vs. {b} be over {line.line}?"
+        else:
+            sign = "-" if line.yes_favored else "+"
+            question = (f"Will {line.yes_team} cover {sign}{line.line} "
+                        f"in {a} vs. {b}?")
         return question, (raw_q,) if raw_q else ()
     primary = _match_question(market)
     aliases = (raw_q,) if raw_q and raw_q != primary else ()
@@ -169,14 +390,18 @@ def normalize_market_data(
     best_bid = max((float(b["px"]["value"]) for b in bids), default=None)
     best_offer = min((float(o["px"]["value"]) for o in offers), default=None)
     ev = _sports_event(market)
-    question, aliases = _questions(market, ev)
+    pr = None if ev else _prop_event(market)
+    ln = None if (ev or pr) else _line_event(market)
+    question, aliases = _questions(market, ev, ln)
     return Market(
         id=f"polymarket_us:{market['slug']}",
         platform="polymarket_us",
         question=question,
         match_aliases=aliases,
         event=ev,
-        futures=None if ev else _futures_event(market),
+        futures=None if (ev or pr) else _futures_event(market),
+        line=ln,
+        prop=pr,
         resolution_date=parse_iso_dt(market.get("endDate")),
         category=market.get("category") or "",
         yes_depth=_levels(offers, lambda p: p),          # YES ask = offer directly
@@ -191,14 +416,18 @@ def normalize_market_data(
 def _market_metadata(market: dict, observed_at: datetime) -> Market:
     """A metadata-only Market (empty depth) for discovery/matching."""
     ev = _sports_event(market)
-    question, aliases = _questions(market, ev)
+    pr = None if ev else _prop_event(market)
+    ln = None if (ev or pr) else _line_event(market)
+    question, aliases = _questions(market, ev, ln)
     return Market(
         id=f"polymarket_us:{market['slug']}",
         platform="polymarket_us",
         question=question,
         match_aliases=aliases,
         event=ev,
-        futures=None if ev else _futures_event(market),
+        futures=None if (ev or pr) else _futures_event(market),
+        line=ln,
+        prop=pr,
         resolution_date=parse_iso_dt(market.get("endDate")),
         category=market.get("category") or "",
         yes_depth=(),

@@ -274,3 +274,29 @@ class TestFinalistSelector:
         # nominee a selector would reject these correct pairs.
         assert competition_score("2028 Democratic presidential nominee",
                                  "2028 Democratic Presidential Nominee") >= 0.75
+
+class TestSeasonRangesAreNotSubEventSelectors:
+    """A season written as a range must not leave a stray number behind.
+
+    "2026-27" once stripped to a bare "27", which `_is_selector` reads as a
+    sub-event selector — hard-zeroing the score against any competition without
+    the same stray digits. It rejected correct pairs across every season-range
+    sport, and silently: a missed match writes no row anywhere.
+    """
+
+    def test_a_season_range_leaves_no_stray_number(self):
+        assert "27" not in competition_tokens("the 2026-27 Serie A")
+        assert "27" not in competition_tokens("2026-2027 NBA MVP")
+        assert "27" not in competition_tokens("2026\u201327 NHL MVP")
+
+    def test_the_same_competition_still_scores_across_a_range(self):
+        assert competition_score(
+            "College Football Playoffs",
+            "advances to the 2026-27 College Football Playoff") > 0.0
+
+    def test_real_stage_numbers_are_still_selectors(self):
+        # The fix must not weaken the guard it sits next to.
+        assert competition_score("Tour de France: Stage 9 Winner",
+                                 "Tour de France Winner") == 0.0
+        assert competition_score("Tour de France: Stage 9 Winner",
+                                 "Tour de France: Stage 8 Winner") == 0.0

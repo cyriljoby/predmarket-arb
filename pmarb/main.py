@@ -18,6 +18,7 @@ import sys
 import time
 import traceback
 from collections import defaultdict
+from dataclasses import replace
 
 import aiohttp
 
@@ -42,7 +43,7 @@ from pmarb.latency import LatencyHistogram
 from pmarb.oplog import LatestOpportunityLog, OpportunityLogger
 
 # Only stream the trustworthy tiers — lexical is noise (see multi-outcome guard).
-_TRUSTED = {"structured", "futures"}
+_TRUSTED = {"structured", "futures", "line", "prop"}
 
 
 # Why a row exists. Persisted on every observation, because "no row" and "a row
@@ -90,6 +91,27 @@ def sample_reason(
     if seconds_since_last >= heartbeat:
         return HEARTBEAT
     return None
+
+
+def oriented(poly, match: dict):
+    """The Poly leg as the detector must see it: YES meaning what Kalshi's YES
+    means.
+
+    Spread pairs are the one place that is not automatic. Poly lists a single
+    market per (game, line) and may quote either side of it, so on ~half the
+    inventory its YES is the COMPLEMENT of the Kalshi leg's YES (see
+    matching/lines.py). The detector hedges YES against NO; handed a
+    complementary pair unswapped it would buy the same event on both venues and
+    report a guaranteed profit that does not exist.
+
+    Swapping the ladders is exact, not an approximation: the feed already
+    derives each side's ask ladder from the other side's bids, so `no_depth` IS
+    the tradable other side of the same book.
+    """
+    if not match.get("poly_inverted"):
+        return poly
+    return replace(poly, yes_depth=poly.no_depth, no_depth=poly.yes_depth,
+                   yes_bid=poly.no_bid, no_bid=poly.yes_bid)
 
 
 async def _fetch_with_retry(feed, attempts: int = 8):
@@ -205,6 +227,7 @@ async def run(duration: float | None) -> None:
                     if partner is None:
                         continue  # partner not seen yet — wait for its first book
                     k, p = (mk, partner) if mk.platform == "kalshi" else (partner, mk)
+                    p = oriented(p, match)
                     # require_edge=False: record the full spread distribution, not
                     # just positive windows (None only if stale / one-sided book).
                     ev = evaluate_pair(k, p, now, require_edge=False)

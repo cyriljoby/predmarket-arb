@@ -18,11 +18,14 @@ from pmarb.credentials import PolymarketUSCredentials
 from pmarb.feeds.kalshi import KalshiFeed
 from pmarb.feeds.polymarket import PolymarketUSFeed
 from pmarb.matching.futures import FuturesMatcher
+from pmarb.matching.hazards import annotate as annotate_hazards
+from pmarb.matching.lines import LineMatcher
 from pmarb.matching.matcher import (
     RuleBasedMatcher,
     dedupe_one_to_one,
     write_matches,
 )
+from pmarb.matching.props import PropMatcher
 from pmarb.matching.structured import StructuredMatcher
 
 
@@ -37,6 +40,8 @@ async def main() -> None:
     # claimed by a higher-priority (more precise) layer.
     structured = StructuredMatcher().match(kalshi, poly)
     futures = FuturesMatcher().match(kalshi, poly)
+    lines = LineMatcher().match(kalshi, poly)
+    props = PropMatcher().match(kalshi, poly)
     lexical = RuleBasedMatcher().match(kalshi, poly)
 
     # Each layer is reduced to a strict 1:1 assignment before the next one runs,
@@ -46,8 +51,12 @@ async def main() -> None:
     candidates: list = []
     claimed_k: set = set()
     claimed_p: set = set()
-    for group in (structured, futures, lexical):
+    for group in (structured, futures, lines, props, lexical):
         candidates.extend(dedupe_one_to_one(group, claimed_k, claimed_p))
+    # A hazard does not reject a pair — it records that the hedge has a hole
+    # (ties, walkovers, driver substitution) that no amount of correct matching
+    # closes. It travels with the match so review and sizing can see it.
+    candidates = annotate_hazards(candidates)
     write_matches(candidates)  # -> matches.json
 
     by_id = {m.id: m for m in kalshi + poly}
@@ -58,6 +67,8 @@ async def main() -> None:
         review.append(
             {
                 "match_method": c.match_method,
+                "settlement_hazards": list(c.settlement_hazards),
+                "poly_inverted": c.poly_inverted,
                 "similarity_score": c.similarity_score,
                 "resolution_date_delta_days": c.resolution_date_delta_days,
                 "kalshi": {
@@ -80,6 +91,7 @@ async def main() -> None:
     kept = Counter(c.match_method for c in candidates)
     print(f"candidates: {len(candidates)}  "
           f"(structured {kept['structured']}, futures {kept['futures']}, "
+          f"line {kept['line']}, prop {kept['prop']}, "
           f"lexical {kept['lexical']})")
     print("wrote matches.json and matches_review.json")
 

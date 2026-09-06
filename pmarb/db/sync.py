@@ -89,7 +89,11 @@ def upsert_match_pairs(conn, matches: list[dict],
             m["kalshi_id"], m["polymarket_id"], m["match_method"],
             m["similarity_score"], m.get("resolution_date_delta_days"),
             rv.get("resolution_match"), rv.get("cohort"), rv.get("standard"),
-            rv.get("notes") or None, rv.get("reviewer"), now,
+            rv.get("notes") or None, rv.get("reviewer"),
+            # Hazards travel with the pair rather than being recomputed later:
+            # the table grows as review finds mechanisms, and a report must
+            # reflect what was believed when the pair was streamed.
+            list(m.get("settlement_hazards") or []), now,
         ))
     with conn.cursor() as cur:
         cur.executemany(
@@ -97,8 +101,9 @@ def upsert_match_pairs(conn, matches: list[dict],
             INSERT INTO match_pair (
                 market_a_id, market_b_id, match_method, similarity_score,
                 date_delta_days, resolution_match, review_cohort,
-                review_standard, review_notes, reviewer, first_seen)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                review_standard, review_notes, reviewer,
+                settlement_hazards, first_seen)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (market_a_id, market_b_id) DO UPDATE SET
                 match_method      = EXCLUDED.match_method,
                 similarity_score  = EXCLUDED.similarity_score,
@@ -108,6 +113,7 @@ def upsert_match_pairs(conn, matches: list[dict],
                 review_standard   = EXCLUDED.review_standard,
                 review_notes      = EXCLUDED.review_notes,
                 reviewer          = EXCLUDED.reviewer,
+                settlement_hazards = EXCLUDED.settlement_hazards,
                 retracted_at      = NULL,      -- re-produced, so un-retract
                 retraction_reason = NULL
             """,

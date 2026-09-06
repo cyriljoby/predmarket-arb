@@ -35,7 +35,14 @@ from pmarb.feeds._util import now_utc as _now_utc
 from pmarb.feeds._util import parse_iso_dt as _parse_dt
 from pmarb.feeds._util import to_float as _to_float
 from pmarb.feeds.auth import kalshi_headers
-from pmarb.models import FuturesEvent, Market, PriceLevel, SportsEvent
+from pmarb.models import (
+    FuturesEvent,
+    LineEvent,
+    Market,
+    PriceLevel,
+    PropEvent,
+    SportsEvent,
+)
 
 _REST = "https://api.elections.kalshi.com/trade-api/v2"
 _WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
@@ -77,6 +84,53 @@ _GAME_SERIES_LEAGUE = {
     "KXTESTMATCH": "cricket",
     "KXWTESTMATCH": "cricket",
 }
+
+# Full-game SPREAD and TOTAL series, mapped to the same league keys the game
+# matcher uses (Poly's slug league codes). Deliberately narrow: only the whole
+# game. Kalshi also runs KXNCAAF1HTOTAL, KXNFL2QSPREAD, KXNCAAFTEAMTOTAL,
+# KXMLBINNINGTOTAL and friends — a first-half total and a full-game total are
+# different contracts, and pairing them would be the same class of error as
+# matching "Stage 9" to the overall race.
+_LINE_SERIES = {
+    "KXNCAAFSPREAD": ("cfb", "spread"), "KXNCAAFTOTAL": ("cfb", "total"),
+    "KXNFLSPREAD": ("nfl", "spread"), "KXNFLTOTAL": ("nfl", "total"),
+    "KXMLBSPREAD": ("mlb", "spread"), "KXMLBTOTAL": ("mlb", "total"),
+    "KXEPLSPREAD": ("epl", "spread"), "KXEPLTOTAL": ("epl", "total"),
+    "KXLALIGASPREAD": ("lal", "spread"), "KXLALIGATOTAL": ("lal", "total"),
+    "KXBUNDESLIGASPREAD": ("bun", "spread"), "KXBUNDESLIGATOTAL": ("bun", "total"),
+    "KXLIGUE1SPREAD": ("lg1", "spread"), "KXLIGUE1TOTAL": ("lg1", "total"),
+    "KXSERIEASPREAD": ("sea", "spread"), "KXSERIEATOTAL": ("sea", "total"),
+    "KXUCLSPREAD": ("ucl", "spread"), "KXUCLTOTAL": ("ucl", "total"),
+    "KXMLSSPREAD": ("mls", "spread"), "KXMLSTOTAL": ("mls", "total"),
+}
+
+# Player-prop series -> (league, stat). The stat vocabulary is shared with the
+# Poly feed and closed on purpose: a stat only one venue names is not extracted,
+# because "receiving yards" paired with "receptions" is two different bets on
+# one player. Kalshi lists these as one market per (player, threshold) rung.
+_PROP_SERIES = {
+    "KXMLBTB": ("mlb", "total_bases"),
+    "KXMLBHRR": ("mlb", "hits_runs_rbis"),
+    "KXMLBHIT": ("mlb", "hits"),
+    "KXMLBHR": ("mlb", "home_runs"),
+    "KXMLBRBI": ("mlb", "rbis"),
+    "KXNFLRECYDS": ("nfl", "receiving_yards"),
+    "KXNFLREC": ("nfl", "receptions"),
+    "KXNFLRSHYDS": ("nfl", "rush_yards"),
+    "KXNFLPASSYDS": ("nfl", "pass_yards"),
+    "KXNFLTD": ("nfl", "touchdowns"),
+    # Pitcher props. Same rung shape, and Poly lists all four.
+    "KXMLBKS": ("mlb", "strikeouts"),
+    "KXMLBHA": ("mlb", "hits_allowed"),
+    "KXMLBERA": ("mlb", "earned_runs_allowed"),
+    "KXMLBWA": ("mlb", "walks_allowed"),
+}
+
+# "Kenneth Walker III: 15+" -> player and the integer threshold.
+_PROP_YES_RE = re.compile(r"^(?P<player>.+?):\s*(?P<n>\d+(?:\.\d+)?)\+\s*$")
+
+# "Vanderbilt wins by over 41.5 points" -> the team YES pays on covering.
+_SPREAD_YES_RE = re.compile(r"^(?P<team>.+?)\s+wins by over\b", re.IGNORECASE)
 
 # Event-ticker game segment: date, optional 4-digit start time, team codes.
 # e.g. "26JUL081845HOUWSH" -> 2026-07-08 18:45 ET; "26SEP14DALSEA" -> date only.
@@ -146,6 +200,104 @@ def _sports_event(market: dict, event: dict | None) -> SportsEvent | None:
         competitors=competitors,  # type: ignore[arg-type]
         yes_competitor=yes,
         yes_abbrev=parts[-1].lower(),
+    )
+
+
+def _line_event(market: dict, event: dict | None) -> LineEvent | None:
+    """Spread/total identity for a market in a full-game line series, or None.
+
+    The line itself is `floor_strike`, and every market in these series carries
+    `strike_type: "greater"` (verified: 5,091/5,091 across the ten series) — so
+    YES is always "over" and a market without that shape is refused rather than
+    guessed at.
+
+    Competitors come from the enclosing event title, which is the only place
+    they appear: a total's own title is just "Over 35.5 points scored", naming
+    neither team. The spread's YES team, by contrast, IS in `yes_sub_title`
+    ("Vanderbilt wins by over 41.5 points"), which is what fixes orientation.
+    """
+    ticker = market.get("ticker", "")
+    parts = ticker.split("-")
+    mapped = _LINE_SERIES.get(parts[0])
+    if mapped is None or event is None or len(parts) < 3:
+        return None
+    league, kind = mapped
+    line = market.get("floor_strike")
+    if line is None or market.get("strike_type") != "greater":
+        return None
+    title = event.get("title") or ""
+    vs_part = next((p for p in title.split(":") if _VS_RE.search(p)), None)
+    if vs_part is None:
+        return None
+    competitors = tuple(
+        re.sub(r"\s+\d+$", "", s).strip()
+        for s in _VS_RE.split(vs_part.strip(), maxsplit=1)
+    )
+    if len(competitors) != 2 or not all(competitors):
+        return None
+    yes_team = ""
+    if kind == "spread":
+        m = _SPREAD_YES_RE.match((market.get("yes_sub_title") or "").strip())
+        if m is None:
+            return None  # orientation unknown -> refuse, never assume a side
+        yes_team = m["team"].strip()
+    return LineEvent(
+        league=league,
+        start_time=_parse_event_start(parts[1]),
+        competitors=competitors,  # type: ignore[arg-type]
+        kind=kind,
+        line=float(line),
+        yes_team=yes_team,
+        # "X wins by over L" is always X laying L points.
+        yes_favored=True,
+    )
+
+
+def _prop_event(market: dict, event: dict | None) -> PropEvent | None:
+    """Player-prop identity for a market in a prop series, or None.
+
+    `yes_sub_title` carries both facts that matter ("Kenneth Walker III: 15+"),
+    and `floor_strike` carries the same threshold in half-point form (14.5,
+    strike_type greater). Both are read and CROSS-CHECKED: they encode one
+    number two ways, so a disagreement means the wire format moved and the
+    market must be refused rather than half-understood.
+
+    The game comes from the enclosing event title ("Denver vs Kansas City:
+    Receiving Yards"), the only place the two teams appear.
+    """
+    ticker = market.get("ticker", "")
+    parts = ticker.split("-")
+    mapped = _PROP_SERIES.get(parts[0])
+    if mapped is None or event is None or len(parts) < 3:
+        return None
+    league, stat = mapped
+    m = _PROP_YES_RE.match((market.get("yes_sub_title") or "").strip())
+    if m is None or market.get("strike_type") != "greater":
+        return None
+    threshold = float(m["n"])
+    floor = market.get("floor_strike")
+    # "15+" must be the same rung as floor_strike 14.5. Tolerance is for float
+    # representation only, not for disagreement.
+    if floor is None or abs(float(floor) + 0.5 - threshold) > 1e-6:
+        return None
+    title = event.get("title") or ""
+    vs_part = next((p for p in title.split(":") if _VS_RE.search(p)), None)
+    if vs_part is None:
+        return None
+    competitors = tuple(
+        re.sub(r"\s+\d+$", "", x).strip()
+        for x in _VS_RE.split(vs_part.strip(), maxsplit=1)
+    )
+    player = m["player"].strip()
+    if len(competitors) != 2 or not all(competitors) or not player:
+        return None
+    return PropEvent(
+        league=league,
+        start_time=_parse_event_start(parts[1]),
+        competitors=competitors,  # type: ignore[arg-type]
+        player=player,
+        stat=stat,
+        threshold=threshold,
     )
 
 
@@ -237,8 +389,12 @@ def _market_metadata(
         yes_bid=_to_float(market.get("yes_bid_dollars")),
         no_bid=_to_float(market.get("no_bid_dollars")),
         event=(game := _sports_event(market, event)),
-        # A game is never also an outright — only extract futures if not a game.
-        futures=None if game else _futures_event(market, event),
+        # Priority matters: a prop's yes_sub_title ("Cal Raleigh: 2+") reads as
+        # an entity, so without this every one of the 6,331 prop markets was
+        # classified as an OUTRIGHT and offered to the futures matcher.
+        prop=(prop := None if game else _prop_event(market, event)),
+        futures=None if (game or prop) else _futures_event(market, event),
+        line=None if (game or prop) else _line_event(market, event),
     )
 
 

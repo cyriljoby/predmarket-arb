@@ -53,6 +53,77 @@ class FuturesEvent:
     entity_abbrev: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class LineEvent:
+    """Structured identity of a SPREAD or TOTAL market on a single game.
+
+    A moneyline asks who wins; these ask by how much, against a NUMBER. That
+    number is the contract: a total at 45.5 and a total at 46.5 on the same
+    game are different bets, so `line` is part of the identity, never a
+    tolerance.
+
+    Both venues encode it numerically — Kalshi as `floor_strike` with
+    `strike_type: greater`, Poly as `line` — so this identity is exact
+    arithmetic rather than the text similarity the lexical matcher needs.
+
+    ORIENTATION is the subtle part and the reason `yes_team` exists. Kalshi
+    writes one market per side ("Vanderbilt wins by over 41.5"), while Poly
+    writes ONE market per (game, line) whose long side may be either the
+    favorite (-41.5) or the underdog (+41.5) — measured across the live
+    catalog, 4,046 groups were favorite-side and 4,477 underdog-side, never
+    both. So YES means the same event on both venues only when `yes_team`
+    agrees; when it names the opponent, the two YESes are complements and the
+    hedge is inverted (see `MatchCandidate.poly_inverted`). Pairing those
+    blindly would buy the SAME event twice while believing it was hedged.
+    """
+
+    league: str
+    start_time: datetime | None
+    competitors: tuple[str, str]
+    kind: str                    # "spread" | "total"
+    line: float                  # the number itself; exact equality is required
+    # spread: the competitor whose covering YES pays on. total: "" (YES is
+    # always Over on both venues — Kalshi writes "Over N points scored" and
+    # Poly's long side was Over on all 9,672 markets sampled).
+    yes_team: str = ""
+    # spread only: is `yes_team` laying the points (-L, the favorite) or
+    # receiving them (+L)? The SIGN is half the contract and cannot be
+    # recovered from the team alone — "Denver -5.5" (Denver wins by more than
+    # 5.5) and "Denver +5.5" (Denver loses by less than 5.5, or wins) are
+    # different bets that share a team and a number. Kalshi only ever writes
+    # the laying side ("Denver wins by over 5.5"), so it is always True there.
+    yes_favored: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class PropEvent:
+    """Structured identity of a PLAYER PROP ("will PLAYER reach N of STAT").
+
+    The largest matchable block on either venue: Kalshi lists 6,331 of these
+    across a dozen series and Poly's props are its single biggest market type.
+    Both publish the same four facts — the game, the player, the statistic, and
+    an integer threshold — so identity here is exact, like a line and unlike
+    anything the lexical matcher handles.
+
+    THRESHOLD CONVENTION. Both venues mean "at least N": Kalshi writes "15+"
+    with `floor_strike` at the half-point below (14.5, strike_type greater),
+    Poly writes `line: 15` with a gte question. This field stores N — the
+    integer both venues name — so equality is direct and there is no push to
+    reason about (a player cannot record 14.5 receptions).
+
+    STAT is a closed vocabulary shared by both feeds. A stat that only one
+    venue names is not extracted at all: "receiving yards" paired with
+    "receptions" would be two different bets on one player.
+    """
+
+    league: str
+    start_time: datetime | None
+    competitors: tuple[str, str]   # the game, for verification
+    player: str
+    stat: str
+    threshold: float               # N, meaning "at least N"
+
+
 class PriceLevel(NamedTuple):
     """One level of order-book depth."""
 
@@ -94,6 +165,13 @@ class Market:
     # or unstructured (both None -> lexical matcher).
     event: SportsEvent | None = None     # head-to-head game (moneyline markets)
     futures: FuturesEvent | None = None  # entity-outright (winner/next/appointment)
+    # Spread/total on a game. A market carries at most ONE structured identity;
+    # this is the third kind, and it is deliberately separate from `event`
+    # because a spread is not a moneyline: the line is part of the contract.
+    line: LineEvent | None = None
+    # Player prop on a game. Fourth and last structured identity; like the
+    # others, a market carries at most one.
+    prop: PropEvent | None = None
     # Monotonic clock reading taken the instant this update's bytes came off the
     # socket, before any parsing. Paired with a second reading after detection,
     # it measures how long this stack takes to see an edge — the Δ the

@@ -2,8 +2,14 @@
 
 import asyncio
 from datetime import UTC, datetime
+from typing import ClassVar
 
-from pmarb.feeds.kalshi import KalshiFeed, _asks_from_bids, normalize_orderbook
+from pmarb.feeds.kalshi import (
+    KalshiFeed,
+    _asks_from_bids,
+    _line_event,
+    normalize_orderbook,
+)
 from pmarb.models import PriceLevel
 
 OBSERVED = datetime(2026, 6, 29, 12, 0, 0, tzinfo=UTC)
@@ -273,3 +279,59 @@ class TestStreamBooks:
             }},
         ])
         assert len(out) == 1  # only the snapshot; gap broke the loop before the delta
+
+
+class TestLineExtraction:
+    """Kalshi's own title names neither team on a total ("Over 35.5 points
+    scored") — the enclosing EVENT title is the only place they appear, which
+    is why discovery has to pass it through."""
+
+    @staticmethod
+    def _market(**over):
+        base = {"ticker": "KXNCAAFTOTAL-26SEP12DELVAN-36",
+                "title": "Over 35.5 points scored",
+                "yes_sub_title": "Over 35.5 points scored",
+                "floor_strike": 35.5, "strike_type": "greater",
+                "close_time": "2026-09-14T20:15:00Z"}
+        base.update(over)
+        return base
+
+    EVENT: ClassVar[dict] = {"title": "Delaware vs Vanderbilt: Total Points"}
+
+    def test_total_takes_its_teams_from_the_event_title(self):
+        le = _line_event(self._market(), self.EVENT)
+        assert le.kind == "total" and le.line == 35.5 and le.league == "cfb"
+        assert le.competitors == ("Delaware", "Vanderbilt")
+        assert le.yes_team == ""          # YES is Over, not a team
+
+    def test_spread_takes_its_yes_team_from_the_subtitle(self):
+        le = _line_event(self._market(
+            ticker="KXNCAAFSPREAD-26SEP12DELVAN-VAN42",
+            title="Vanderbilt wins by over 41.5 points",
+            yes_sub_title="Vanderbilt wins by over 41.5 points",
+            floor_strike=41.5), {"title": "Delaware vs Vanderbilt: Spread"})
+        assert le.kind == "spread" and le.yes_team == "Vanderbilt"
+        # Kalshi only ever writes the laying side.
+        assert le.yes_favored is True
+
+    def test_without_the_event_there_is_no_identity(self):
+        # The regression that hid this whole market class: discovery HAS the
+        # event and dropped it, so totals had no team names at all.
+        assert _line_event(self._market(), None) is None
+
+    def test_a_spread_whose_side_cannot_be_read_is_refused(self):
+        assert _line_event(self._market(
+            ticker="KXNCAAFSPREAD-26SEP12DELVAN-VAN42",
+            yes_sub_title="Something unparseable"),
+            {"title": "Delaware vs Vanderbilt: Spread"}) is None
+
+    def test_sub_period_series_are_not_full_game_lines(self):
+        for t in ("KXNCAAF1HTOTAL-26SEP12DELVAN-36",
+                  "KXNFL2QSPREAD-26SEP14DENKC-KC7",
+                  "KXNCAAFTEAMTOTAL-26SEP12DELVAN-21",
+                  "KXMLBINNINGTOTAL-26SEP0618WSHLAD-2"):
+            assert _line_event(self._market(ticker=t), self.EVENT) is None
+
+    def test_a_non_greater_strike_is_refused(self):
+        assert _line_event(
+            self._market(strike_type="less"), self.EVENT) is None

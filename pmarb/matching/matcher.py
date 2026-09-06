@@ -77,7 +77,16 @@ class MatchCandidate:
     resolution_match: bool | None = None  # set MANUALLY during review
     resolution_notes: str = ""
     verified_by: str | None = None
-    match_method: str = "lexical"  # "lexical" | "structured"
+    match_method: str = "lexical"  # "lexical" | "structured" | "futures" | "line"
+    # Spread/total pairs only. TRUE means the Poly leg's YES is the COMPLEMENT
+    # of the Kalshi leg's YES (Poly quoted the other side of the line), so the
+    # collector must swap that leg's ladders before evaluating. Ignoring it
+    # would buy the same event on both venues and call it a hedge.
+    poly_inverted: bool = False
+    # Known settlement divergences for this pair (see matching/hazards.py).
+    # Populated from the Kalshi leg's series, NOT a review verdict: a hazard
+    # says the hedge has a hole, while `resolution_match` stays the human call.
+    settlement_hazards: tuple[str, ...] = ()
 
 
 class RuleBasedMatcher:
