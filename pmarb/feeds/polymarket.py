@@ -60,6 +60,9 @@ _YES_IF_RE = re.compile(
     re.IGNORECASE,
 )
 _SCHEDULED_RE = re.compile(r",\s*scheduled\b.*$", re.IGNORECASE)
+# Below this, the "sentence" is an abbreviation ("Arizona St.", "A.J.") rather
+# than a question. Chosen from the data: real first sentences run 12+ words.
+_MIN_QUESTION_WORDS = 5
 
 
 def _match_question(market: dict) -> str:
@@ -73,7 +76,18 @@ def _match_question(market: dict) -> str:
     desc = (market.get("description") or "").strip()
     if not desc:
         return market.get("question", "")
-    first = re.split(r"(?<=[.?!])\s+", desc, maxsplit=1)[0]
+    # A period is not reliably a sentence end here: the subjects themselves are
+    # full of them. "Arizona St. advances to..." and "A.J. Brown records 1+
+    # touchdowns..." both truncate to the abbreviation alone, which is exactly
+    # the text a reviewer needs to judge the pair. Rather than enumerate
+    # abbreviations, keep taking sentences until the result says something —
+    # a real first sentence always clears the bar, an abbreviation never does.
+    parts = re.split(r"(?<=[.?!])\s+", desc)
+    first = ""
+    for part in parts:
+        first = f"{first} {part}".strip() if first else part
+        if len(_YES_IF_RE.sub("", first).split()) >= _MIN_QUESTION_WORDS:
+            break
     first = _YES_IF_RE.sub("", first)
     first = _SCHEDULED_RE.sub("", first).strip()
     return first or market.get("question", "")

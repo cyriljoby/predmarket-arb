@@ -1,0 +1,486 @@
+[
+ {
+  "kalshi_series": "KXNCAAFSPREAD",
+  "mapped_league": "cfb",
+  "mapped_concept": "spread",
+  "pairs_covered": 1179,
+  "examples": [
+   {
+    "kalshi_question": "Florida St. wins by over 10.5 points",
+    "kalshi_rules": "If Florida St. wins by more than 10.5 points in the SMU vs Florida St. college football game originally scheduled for Sep 7, 2026, then the market resolves to Yes.",
+    "poly_question": "Will SMU Mustangs cover +10.5 in SMU Mustangs vs. Florida State Seminoles?",
+    "poly_rules": "This market will settle to Yes if Seminoles wins by more than 10.5 in the Seminoles vs Mustangs College Football game scheduled for Sep 7, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not resched"
+   },
+   {
+    "kalshi_question": "Florida St. wins by over 13.5 points",
+    "kalshi_rules": "If Florida St. wins by more than 13.5 points in the SMU vs Florida St. college football game originally scheduled for Sep 7, 2026, then the market resolves to Yes.",
+    "poly_question": "Will SMU Mustangs cover +13.5 in SMU Mustangs vs. Florida State Seminoles?",
+    "poly_rules": "This market will settle to Yes if Seminoles wins by more than 13.5 in the Seminoles vs Mustangs College Football game scheduled for Sep 7, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not resched"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXNFLRECYDS",
+  "mapped_league": "nfl",
+  "mapped_concept": "receiving_yards",
+  "pairs_covered": 481,
+  "examples": [
+   {
+    "kalshi_question": "A.J. Brown: 100+ receiving yards",
+    "kalshi_rules": "If A.J. Brown records 100+ receiving yards in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "A.J.",
+    "poly_rules": "This market will settle to Yes if A.J. Brown records 100+ receiving yards in the New England Patriots vs Seattle Seahawks NFL game scheduled for Sep 9, 2026. Regulation and overtime statistics are included. The listed player must participat"
+   },
+   {
+    "kalshi_question": "A.J. Brown: 110+ receiving yards",
+    "kalshi_rules": "If A.J. Brown records 110+ receiving yards in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "A.J.",
+    "poly_rules": "This market will settle to Yes if A.J. Brown records 110+ receiving yards in the New England Patriots vs Seattle Seahawks NFL game scheduled for Sep 9, 2026. Regulation and overtime statistics are included. The listed player must participat"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXNFLREC",
+  "mapped_league": "nfl",
+  "mapped_concept": "receptions",
+  "pairs_covered": 426,
+  "examples": [
+   {
+    "kalshi_question": "A.J. Brown: 10+ receptions",
+    "kalshi_rules": "If A.J. Brown records 10+ receptions in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "A.J.",
+    "poly_rules": "This market will settle to Yes if A.J. Brown records 10+ receptions in the New England Patriots vs Seattle Seahawks NFL game scheduled for Sep 9, 2026. Regulation and overtime statistics are included. The listed player must participate in t"
+   },
+   {
+    "kalshi_question": "A.J. Brown: 3+ receptions",
+    "kalshi_rules": "If A.J. Brown records 3+ receptions in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "A.J.",
+    "poly_rules": "This market will settle to Yes if A.J. Brown records 3+ receptions in the New England Patriots vs Seattle Seahawks NFL game scheduled for Sep 9, 2026. Regulation and overtime statistics are included. The listed player must participate in th"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXNFLSPREAD",
+  "mapped_league": "nfl",
+  "mapped_concept": "spread",
+  "pairs_covered": 364,
+  "examples": [
+   {
+    "kalshi_question": "New England wins by over 10.5 points?",
+    "kalshi_rules": "If New England wins by more than 10.5 points in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "Will New England Patriots cover -10.5 in New England Patriots vs. Seattle Seahawks?",
+    "poly_rules": "This market will settle to Yes if New England Patriots wins by more than 10.5 in the New England Patriots vs Seattle Seahawks professional football game scheduled for Sep 9, 2026. Overtime is included if played. If the game is delayed, post"
+   },
+   {
+    "kalshi_question": "New England wins by over 13.5 points?",
+    "kalshi_rules": "If New England wins by more than 13.5 points in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "Will New England Patriots cover -13.5 in New England Patriots vs. Seattle Seahawks?",
+    "poly_rules": "This market will settle to Yes if New England Patriots wins by more than 13.5 in the New England Patriots vs Seattle Seahawks professional football game scheduled for Sep 9, 2026. Overtime is included if played. If the game is delayed, post"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXNFLTD",
+  "mapped_league": "nfl",
+  "mapped_concept": "touchdowns",
+  "pairs_covered": 337,
+  "examples": [
+   {
+    "kalshi_question": "A.J. Brown: 1+ touchdowns",
+    "kalshi_rules": "If A.J. Brown scores at least 1+ touchdowns in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "A.J.",
+    "poly_rules": "This market will settle to Yes if A.J. Brown records 1+ touchdowns (excluding passing touchdowns) in the New England Patriots vs Seattle Seahawks professional football game scheduled for Sep 9, 2026. Overtime is included if played. If the p"
+   },
+   {
+    "kalshi_question": "A.J. Brown: 2+ touchdowns",
+    "kalshi_rules": "If A.J. Brown scores at least 2+ touchdowns in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "A.J.",
+    "poly_rules": "This market will settle to Yes if A.J. Brown records 2+ touchdowns (excluding passing touchdowns) in the New England Patriots vs Seattle Seahawks professional football game scheduled for Sep 9, 2026. Overtime is included if played. If the p"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXNFLTOTAL",
+  "mapped_league": "nfl",
+  "mapped_concept": "total",
+  "pairs_covered": 140,
+  "examples": [
+   {
+    "kalshi_question": "Will there be over 26.5 points scored?",
+    "kalshi_rules": "If New England and Seattle collectively score more than 26.5 points in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "Will the total in New England Patriots vs. Seattle Seahawks be over 26.5?",
+    "poly_rules": "This market will settle to Yes if New England Patriots and Seattle Seahawks combine for over 26.5 points in the New England Patriots vs Seattle Seahawks professional football game scheduled for Sep 9, 2026. Overtime is included if played. I"
+   },
+   {
+    "kalshi_question": "Will there be over 32.5 points scored?",
+    "kalshi_rules": "If New England and Seattle collectively score more than 32.5 points in the New England vs Seattle Pro Football game originally scheduled for Sep 9, 2026, then the market resolves to Yes.",
+    "poly_question": "Will the total in New England Patriots vs. Seattle Seahawks be over 32.5?",
+    "poly_rules": "This market will settle to Yes if New England Patriots and Seattle Seahawks combine for over 32.5 points in the New England Patriots vs Seattle Seahawks professional football game scheduled for Sep 9, 2026. Overtime is included if played. I"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBTB",
+  "mapped_league": "mlb",
+  "mapped_concept": "total_bases",
+  "pairs_covered": 120,
+  "examples": [
+   {
+    "kalshi_question": "Ozzie Albies: 2+ total bases?",
+    "kalshi_rules": "If Ozzie Albies records 2+ total bases in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Ozzie Albies records 2 or more total bases in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Ozzie Albies records 2 or more total bases in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be in t"
+   },
+   {
+    "kalshi_question": "Ozzie Albies: 3+ total bases?",
+    "kalshi_rules": "If Ozzie Albies records 3+ total bases in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Ozzie Albies records 3 or more total bases in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Ozzie Albies records 3 or more total bases in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be in t"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBHIT",
+  "mapped_league": "mlb",
+  "mapped_concept": "hits",
+  "pairs_covered": 99,
+  "examples": [
+   {
+    "kalshi_question": "Drake Baldwin: 1+ hits?",
+    "kalshi_rules": "If Drake Baldwin records 1+ hits in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Drake Baldwin records 1 or more hits in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Drake Baldwin records 1 or more hits in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be in the sta"
+   },
+   {
+    "kalshi_question": "Drake Baldwin: 2+ hits?",
+    "kalshi_rules": "If Drake Baldwin records 2+ hits in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Drake Baldwin records 2 or more hits in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Drake Baldwin records 2 or more hits in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be in the sta"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBHR",
+  "mapped_league": "mlb",
+  "mapped_concept": "home_runs",
+  "pairs_covered": 71,
+  "examples": [
+   {
+    "kalshi_question": "Drake Baldwin: 1+ home runs?",
+    "kalshi_rules": "If Drake Baldwin records 1+ home runs in Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Drake Baldwin hits 1 or more home runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Drake Baldwin hits 1 or more home runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be in the s"
+   },
+   {
+    "kalshi_question": "Drake Baldwin: 2+ home runs?",
+    "kalshi_rules": "If Drake Baldwin records 2+ home runs in Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Drake Baldwin hits 2 or more home runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Drake Baldwin hits 2 or more home runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be in the s"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBKS",
+  "mapped_league": "mlb",
+  "mapped_concept": "strikeouts",
+  "pairs_covered": 56,
+  "examples": [
+   {
+    "kalshi_question": "Grant Holmes: 2+ strikeouts?",
+    "kalshi_rules": "If Grant Holmes records 2+ strikeouts in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Grant Holmes records 2 or more strikeouts in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Grant Holmes records 2 or more strikeouts in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be the s"
+   },
+   {
+    "kalshi_question": "Grant Holmes: 3+ strikeouts?",
+    "kalshi_rules": "If Grant Holmes records 3+ strikeouts in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Grant Holmes records 3 or more strikeouts in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET.",
+    "poly_rules": "This market will settle to Yes if Grant Holmes records 3 or more strikeouts in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. The listed player must be the s"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBSPREAD",
+  "mapped_league": "mlb",
+  "mapped_concept": "spread",
+  "pairs_covered": 40,
+  "examples": [
+   {
+    "kalshi_question": "Atlanta wins by over 1.5 runs?",
+    "kalshi_rules": "If Atlanta wins by more than 1.5 runs in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Will Atlanta Braves cover -1.5 in Atlanta Braves vs. Philadelphia Phillies?",
+    "poly_rules": "This market will settle to Yes if the Atlanta Braves win by more than 1.5 runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. If the game is shortened but"
+   },
+   {
+    "kalshi_question": "Atlanta wins by over 2.5 runs?",
+    "kalshi_rules": "If Atlanta wins by more than 2.5 runs in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Will Atlanta Braves cover -2.5 in Atlanta Braves vs. Philadelphia Phillies?",
+    "poly_rules": "This market will settle to Yes if the Atlanta Braves win by more than 2.5 runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. If the game is shortened but"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXUCLTOTAL",
+  "mapped_league": "ucl",
+  "mapped_concept": "total",
+  "pairs_covered": 40,
+  "examples": [
+   {
+    "kalshi_question": "Will over 0.5 goals be scored?",
+    "kalshi_rules": "If over 0.5 goals are scored in the AEK Athens vs LASK professional Champions League soccer game originally scheduled for Sep 8, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves t",
+    "poly_question": "Will the total in AEK vs. LASK Linz combine to be over 0.5?",
+    "poly_rules": "This market will settle to Yes if AEK and LASK Linz combine to score over 0.5 goals during 90 minutes plus stoppage time in the AEK vs LASK Linz UEFA Champions League match scheduled for 2026-09-08 12:45PM ET. If the match is delayed, postp"
+   },
+   {
+    "kalshi_question": "Will over 1.5 goals be scored?",
+    "kalshi_rules": "If over 1.5 goals are scored in the AEK Athens vs LASK professional Champions League soccer game originally scheduled for Sep 8, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves t",
+    "poly_question": "Will the total in AEK vs. LASK Linz combine to be over 1.5?",
+    "poly_rules": "This market will settle to Yes if AEK and LASK Linz combine to score over 1.5 goals during 90 minutes plus stoppage time in the AEK vs LASK Linz UEFA Champions League match scheduled for 2026-09-08 12:45PM ET. If the match is delayed, postp"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXEPLTOTAL",
+  "mapped_league": "epl",
+  "mapped_concept": "total",
+  "pairs_covered": 36,
+  "examples": [
+   {
+    "kalshi_question": "Will over 0.5 goals be scored?",
+    "kalshi_rules": "If over 0.5 goals are scored in the Aston Villa vs Nottingham Forest professional EPL soccer game originally scheduled for Sep 12, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves",
+    "poly_question": "Will the total in Aston Villa FC vs. Nottingham Forest FC combine to be over 0.5?",
+    "poly_rules": "This market will settle to Yes if Aston Villa FC and Nottingham Forest FC combine to score over 0.5 goals during 90 minutes plus stoppage time in the Aston Villa FC vs Nottingham Forest FC Premier League match scheduled for 2026-09-12 10:00"
+   },
+   {
+    "kalshi_question": "Will over 1.5 goals be scored?",
+    "kalshi_rules": "If over 1.5 goals are scored in the Aston Villa vs Nottingham Forest professional EPL soccer game originally scheduled for Sep 12, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves",
+    "poly_question": "Will the total in Aston Villa FC vs. Nottingham Forest FC combine to be over 1.5?",
+    "poly_rules": "This market will settle to Yes if Aston Villa FC and Nottingham Forest FC combine to score over 1.5 goals during 90 minutes plus stoppage time in the Aston Villa FC vs Nottingham Forest FC Premier League match scheduled for 2026-09-12 10:00"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXSERIEATOTAL",
+  "mapped_league": "sea",
+  "mapped_concept": "total",
+  "pairs_covered": 36,
+  "examples": [
+   {
+    "kalshi_question": "Will over 0.5 goals be scored?",
+    "kalshi_rules": "If over 0.5 goals are scored in the Cagliari vs Lecce professional Serie A soccer game originally scheduled for Sep 7, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes.",
+    "poly_question": "Will the total in Cagliari Calcio vs. US Lecce combine to be over 0.5?",
+    "poly_rules": "This market will settle to Yes if Cagliari Calcio and US Lecce combine to score over 0.5 goals during 90 minutes plus stoppage time in the Cagliari Calcio vs US Lecce Serie A match scheduled for 2026-09-07 12:30PM ET. If the match is delaye"
+   },
+   {
+    "kalshi_question": "Will over 1.5 goals be scored?",
+    "kalshi_rules": "If over 1.5 goals are scored in the Cagliari vs Lecce professional Serie A soccer game originally scheduled for Sep 7, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes.",
+    "poly_question": "Will the total in Cagliari Calcio vs. US Lecce combine to be over 1.5?",
+    "poly_rules": "This market will settle to Yes if Cagliari Calcio and US Lecce combine to score over 1.5 goals during 90 minutes plus stoppage time in the Cagliari Calcio vs US Lecce Serie A match scheduled for 2026-09-07 12:30PM ET. If the match is delaye"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXLALIGATOTAL",
+  "mapped_league": "lal",
+  "mapped_concept": "total",
+  "pairs_covered": 32,
+  "examples": [
+   {
+    "kalshi_question": "Will over 0.5 goals be scored?",
+    "kalshi_rules": "If over 0.5 goals are scored in the Elche vs Real Sociedad professional La Liga soccer game originally scheduled for Sep 7, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes",
+    "poly_question": "Will the total in Elche CF vs. Real Sociedad de Futbol combine to be over 0.5?",
+    "poly_rules": "This market will settle to Yes if Elche CF and Real Sociedad de Futbol combine to score over 0.5 goals during 90 minutes plus stoppage time in the Elche CF vs Real Sociedad de Futbol La Liga match scheduled for 2026-09-07 3:30PM ET. If the "
+   },
+   {
+    "kalshi_question": "Will over 1.5 goals be scored?",
+    "kalshi_rules": "If over 1.5 goals are scored in the Elche vs Real Sociedad professional La Liga soccer game originally scheduled for Sep 7, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes",
+    "poly_question": "Will the total in Elche CF vs. Real Sociedad de Futbol combine to be over 1.5?",
+    "poly_rules": "This market will settle to Yes if Elche CF and Real Sociedad de Futbol combine to score over 1.5 goals during 90 minutes plus stoppage time in the Elche CF vs Real Sociedad de Futbol La Liga match scheduled for 2026-09-07 3:30PM ET. If the "
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBTOTAL",
+  "mapped_league": "mlb",
+  "mapped_concept": "total",
+  "pairs_covered": 30,
+  "examples": [
+   {
+    "kalshi_question": "Over 9.5 runs scored",
+    "kalshi_rules": "If Atlanta and Philadelphia collectively score more 9.5 runs in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Will the total in Atlanta Braves vs. Philadelphia Phillies be over 9.5?",
+    "poly_rules": "This market will settle to Yes if the Atlanta Braves and Philadelphia Phillies combine for over 9.5 runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. If"
+   },
+   {
+    "kalshi_question": "Over 7.5 runs scored",
+    "kalshi_rules": "If Atlanta and Philadelphia collectively score more 7.5 runs in the Atlanta vs Philadelphia professional baseball game originally scheduled for Sep 7, 2026 at 1:05 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Will the total in Atlanta Braves vs. Philadelphia Phillies be over 7.5?",
+    "poly_rules": "This market will settle to Yes if the Atlanta Braves and Philadelphia Phillies combine for over 7.5 runs in the Atlanta Braves vs Philadelphia Phillies MLB game scheduled for 2026-09-07 at 1:05PM ET. Extra innings are included if played. If"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXLIGUE1TOTAL",
+  "mapped_league": "lg1",
+  "mapped_concept": "total",
+  "pairs_covered": 28,
+  "examples": [
+   {
+    "kalshi_question": "Will over 0.5 goals be scored?",
+    "kalshi_rules": "If over 0.5 goals are scored in the Stade Rennais vs Marseille professional Ligue 1 soccer game originally scheduled for Sep 11, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves t",
+    "poly_question": "Will the total in Stade Rennais FC 1901 vs. Olympique de Marseille combine to be over 0.5?",
+    "poly_rules": "This market will settle to Yes if Stade Rennais FC 1901 and Olympique de Marseille combine to score over 0.5 goals during 90 minutes plus stoppage time in the Stade Rennais FC 1901 vs Olympique de Marseille Ligue 1 match scheduled for 2026-"
+   },
+   {
+    "kalshi_question": "Will over 1.5 goals be scored?",
+    "kalshi_rules": "If over 1.5 goals are scored in the Stade Rennais vs Marseille professional Ligue 1 soccer game originally scheduled for Sep 11, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves t",
+    "poly_question": "Will the total in Stade Rennais FC 1901 vs. Olympique de Marseille combine to be over 1.5?",
+    "poly_rules": "This market will settle to Yes if Stade Rennais FC 1901 and Olympique de Marseille combine to score over 1.5 goals during 90 minutes plus stoppage time in the Stade Rennais FC 1901 vs Olympique de Marseille Ligue 1 match scheduled for 2026-"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXBUNDESLIGATOTAL",
+  "mapped_league": "bun",
+  "mapped_concept": "total",
+  "pairs_covered": 24,
+  "examples": [
+   {
+    "kalshi_question": "Will over 0.5 goals be scored?",
+    "kalshi_rules": "If over 0.5 goals are scored in the Union Berlin vs Schalke professional Bundesliga soccer game originally scheduled for Sep 11, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves t",
+    "poly_question": "Will the total in 1. FC Union Berlin vs. FC Schalke 04 combine to be over 0.5?",
+    "poly_rules": "This market will settle to Yes if 1. FC Union Berlin and FC Schalke 04 combine to score over 0.5 goals during 90 minutes plus stoppage time in the 1. FC Union Berlin vs FC Schalke 04 Bundesliga match scheduled for 2026-09-11 2:30PM ET. If t"
+   },
+   {
+    "kalshi_question": "Will over 1.5 goals be scored?",
+    "kalshi_rules": "If over 1.5 goals are scored in the Union Berlin vs Schalke professional Bundesliga soccer game originally scheduled for Sep 11, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves t",
+    "poly_question": "Will the total in 1. FC Union Berlin vs. FC Schalke 04 combine to be over 1.5?",
+    "poly_rules": "This market will settle to Yes if 1. FC Union Berlin and FC Schalke 04 combine to score over 1.5 goals during 90 minutes plus stoppage time in the 1. FC Union Berlin vs FC Schalke 04 Bundesliga match scheduled for 2026-09-11 2:30PM ET. If t"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBHRR",
+  "mapped_league": "mlb",
+  "mapped_concept": "hits_runs_rbis",
+  "pairs_covered": 21,
+  "examples": [
+   {
+    "kalshi_question": "Gunnar Henderson: 1+ hits + runs + RBIs?",
+    "kalshi_rules": "If Gunnar Henderson records 1+ total hits + runs + rbis in the Cleveland vs Baltimore professional baseball game originally scheduled for Sep 7, 2026 at 1:35 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Gunnar Henderson records 1 or more combined hits, runs, and RBIs in the Cleveland Guardians vs Baltimore Orioles MLB game scheduled for 2026-09-07 at 1:35PM ET.",
+    "poly_rules": "This market will settle to Yes if Gunnar Henderson records 1 or more combined hits, runs, and RBIs in the Cleveland Guardians vs Baltimore Orioles MLB game scheduled for 2026-09-07 at 1:35PM ET. Extra innings are included if played. The lis"
+   },
+   {
+    "kalshi_question": "Gunnar Henderson: 2+ hits + runs + RBIs?",
+    "kalshi_rules": "If Gunnar Henderson records 2+ total hits + runs + rbis in the Cleveland vs Baltimore professional baseball game originally scheduled for Sep 7, 2026 at 1:35 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Gunnar Henderson records 2 or more combined hits, runs, and RBIs in the Cleveland Guardians vs Baltimore Orioles MLB game scheduled for 2026-09-07 at 1:35PM ET.",
+    "poly_rules": "This market will settle to Yes if Gunnar Henderson records 2 or more combined hits, runs, and RBIs in the Cleveland Guardians vs Baltimore Orioles MLB game scheduled for 2026-09-07 at 1:35PM ET. Extra innings are included if played. The lis"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBHA",
+  "mapped_league": "mlb",
+  "mapped_concept": "hits_allowed",
+  "pairs_covered": 9,
+  "examples": [
+   {
+    "kalshi_question": "Jonah Tong: 3+ hits allowed?",
+    "kalshi_rules": "If Jonah Tong records 3+ hits allowed in the New York M vs Miami professional baseball game originally scheduled for Sep 7, 2026 at 1:10 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Jonah Tong allows 3 or more hits in the New York Mets vs.",
+    "poly_rules": "This market will settle to Yes if Jonah Tong allows 3 or more hits in the New York Mets vs. Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET. Settlement is based on the final game result, including any extra innings. The listed "
+   },
+   {
+    "kalshi_question": "Jonah Tong: 4+ hits allowed?",
+    "kalshi_rules": "If Jonah Tong records 4+ hits allowed in the New York M vs Miami professional baseball game originally scheduled for Sep 7, 2026 at 1:10 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Jonah Tong allows 4 or more hits in the New York Mets vs.",
+    "poly_rules": "This market will settle to Yes if Jonah Tong allows 4 or more hits in the New York Mets vs. Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET. Settlement is based on the final game result, including any extra innings. The listed "
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBERA",
+  "mapped_league": "mlb",
+  "mapped_concept": "earned_runs_allowed",
+  "pairs_covered": 4,
+  "examples": [
+   {
+    "kalshi_question": "Jonah Tong: 1+ earned runs?",
+    "kalshi_rules": "If Jonah Tong records 1+ earned runs in the New York M vs Miami professional baseball game originally scheduled for Sep 7, 2026 at 1:10 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Jonah Tong allows 1 or more earned runs in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET.",
+    "poly_rules": "This market will settle to Yes if Jonah Tong allows 1 or more earned runs in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET. Extra innings are included if played. The listed player must be the starting pit"
+   },
+   {
+    "kalshi_question": "Jonah Tong: 2+ earned runs?",
+    "kalshi_rules": "If Jonah Tong records 2+ earned runs in the New York M vs Miami professional baseball game originally scheduled for Sep 7, 2026 at 1:10 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Jonah Tong allows 2 or more earned runs in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET.",
+    "poly_rules": "This market will settle to Yes if Jonah Tong allows 2 or more earned runs in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET. Extra innings are included if played. The listed player must be the starting pit"
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ },
+ {
+  "kalshi_series": "KXMLBWA",
+  "mapped_league": "mlb",
+  "mapped_concept": "walks_allowed",
+  "pairs_covered": 2,
+  "examples": [
+   {
+    "kalshi_question": "Jonah Tong: 1+ walks allowed?",
+    "kalshi_rules": "If Jonah Tong records 1+ walks allowed in the New York M vs Miami professional baseball game originally scheduled for Sep 7, 2026 at 1:10 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Jonah Tong allows 1 or more walks in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET.",
+    "poly_rules": "This market will settle to Yes if Jonah Tong allows 1 or more walks in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET. Extra innings are included if played. The listed player must be the starting pitcher; "
+   },
+   {
+    "kalshi_question": "Jonah Tong: 2+ walks allowed?",
+    "kalshi_rules": "If Jonah Tong records 2+ walks allowed in the New York M vs Miami professional baseball game originally scheduled for Sep 7, 2026 at 1:10 PM EDT, then the market resolves to Yes.",
+    "poly_question": "Jonah Tong allows 2 or more walks in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET.",
+    "poly_rules": "This market will settle to Yes if Jonah Tong allows 2 or more walks in the New York Mets vs Miami Marlins MLB game scheduled for 2026-09-07 at 1:10PM ET. Extra innings are included if played. The listed player must be the starting pitcher; "
+   }
+  ],
+  "same_contract": null,
+  "notes": ""
+ }
+]

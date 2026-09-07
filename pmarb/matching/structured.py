@@ -70,9 +70,23 @@ _MIN_SIDE_SCORE = 0.6  # and each competitor individually
 _TIE_MARGIN = 1e-9
 
 
+def _initials(name: str) -> frozenset[str]:
+    """Single-character tokens — Kalshi's abbreviated club names.
+
+    "New York Y" (Yankees), "Los Angeles D" (Dodgers). These are ABBREVIATIONS
+    of a word on the other venue, not words in their own right, which is why
+    `_name_tokens` cannot keep them: as ordinary tokens "y" never equals
+    "yankees", and the correct pair stops matching. Kept separately and applied
+    as a prefix constraint instead — see `competitor_score`.
+    """
+    folded = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    folded = _AANDM_RE.sub("aandm", folded.lower())
+    return frozenset(t for t in _TOKEN_RE.findall(folded) if len(t) == 1)
+
+
 def _name_tokens(name: str) -> frozenset[str]:
-    """Accent-folded, lowercased word tokens; single chars dropped (they're
-    disambiguators like the Y in Kalshi's 'New York Y', useless as tokens).
+    """Accent-folded, lowercased word tokens; single chars handled separately
+    by `_initials` (they abbreviate a word rather than being one).
 
     "St." is ambiguous by position, and the two readings are different schools:
     trailing it abbreviates State (Kansas St.), leading it abbreviates Saint
@@ -105,6 +119,11 @@ def competitor_score(a: str, b: str) -> float:
     ta, tb = _name_tokens(a), _name_tokens(b)
     if not ta or not tb:
         return 0.0
+    # An initial must be borne out by the other side. Without this, "New York Y"
+    # and "New York M" are the SAME token set, so the Yankees and the Mets are
+    # indistinguishable, and the subset rule then happily matches either.
+    if not _initials_agree(a, b, ta, tb):
+        return 0.0
     if ta == tb:
         return _EXACT
     # A discriminator on one side only means these are different programs, not
@@ -115,6 +134,26 @@ def competitor_score(a: str, b: str) -> float:
         return _SUBSET
     contained = len(ta & tb) / min(len(ta), len(tb))
     return _SUBSET * contained if contained >= 0.99 else 0.0
+
+
+def _initials_agree(a: str, b: str, ta: frozenset, tb: frozenset) -> bool:
+    """Does every single-letter abbreviation match a word on the other side?
+
+    "New York Y" against "New York Yankees": the unmatched word on the other
+    side is "yankees", which starts with y — consistent. Against "New York
+    Mets" the unmatched word is "mets", which does not — so these are different
+    clubs and the subset rule must not be allowed to pair them on "New York".
+
+    Only the words the other side does NOT share are candidates: shared words
+    are already accounted for, and an initial abbreviates the part that differs.
+    A side with no leftover word cannot contradict, so it passes.
+    """
+    for name, own, other in ((a, ta, tb), (b, tb, ta)):
+        leftovers = other - own
+        for ch in _initials(name):
+            if leftovers and not any(w.startswith(ch) for w in leftovers):
+                return False
+    return True
 
 
 @dataclass(frozen=True)

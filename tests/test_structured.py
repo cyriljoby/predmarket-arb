@@ -195,14 +195,41 @@ class TestStructuredMatcher:
         assert len(cands) == 1
         assert cands[0].kalshi_id == k.id
 
-    def test_ambiguous_derby_without_abbrev_agreement_is_refused(self):
-        # Same derby, but the venues use different team codes (NYA vs nyy):
-        # no boost, both assignments tie, and the matcher refuses to guess —
-        # guessing wrong would invert the hedge.
+    def test_derby_is_resolved_by_the_initial_when_codes_disagree(self):
+        # Same derby with venue codes that do NOT agree (NYA vs nyy), so the
+        # abbreviation boost cannot help. The single-letter club abbreviation
+        # carries it instead: "New York Y" is borne out by "Yankees" and
+        # contradicted by "Mets".
+        #
+        # This once refused, because single chars were dropped as tokens and
+        # both assignments tied. Refusing was the safe failure, but it was a
+        # failure: the pair is knowable from the text.
         k = kalshi_game_market(
             ticker="KXMLBGAME-26JUL081845NYANYM-NYA",
             yes_sub="New York Y",
             event_title="New York Y vs New York M",
+        )
+        p = poly_moneyline(
+            slug="aec-mlb-nyy-nym-2026-07-08",
+            teams=(("New York Yankees", "nyy", True),
+                   ("New York Mets", "nym", False)),
+        )
+        cands = StructuredMatcher().match([k], [p])
+        assert len(cands) == 1
+        # and to the RIGHT side — pairing YES(Yankees) with YES(Mets) would
+        # invert the hedge rather than merely miss it.
+        assert cands[0].kalshi_id == k.id
+        assert k.event.yes_competitor == "New York Y"
+        assert p.event.yes_competitor == "New York Yankees"
+
+    def test_a_genuinely_ambiguous_derby_is_still_refused(self):
+        # Nothing distinguishes the two Kalshi sides here — no initial, no
+        # agreeing code. Both assignments tie and the matcher must refuse
+        # rather than guess, because guessing wrong inverts the hedge.
+        k = kalshi_game_market(
+            ticker="KXMLBGAME-26JUL081845NYANYM-NYA",
+            yes_sub="New York",
+            event_title="New York vs New York",
         )
         p = poly_moneyline(
             slug="aec-mlb-nyy-nym-2026-07-08",

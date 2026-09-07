@@ -421,3 +421,36 @@ class TestLineExtraction:
         assert _line_event(_poly_line(
             marketType="totals",
             sportsMarketType="football_team_points_full_game_total")) is None
+
+
+class TestQuestionIsNotTruncatedAtAnAbbreviation:
+    """A period is not reliably a sentence end: the subjects are full of them.
+
+    "Arizona St. advances to..." truncated to "Arizona St.", and "A.J. Brown
+    records 1+ touchdowns..." to "A.J." — 187 of 5,727 pairs. Matching was
+    unaffected (futures read the raw question, props match on structured
+    identity), but this is the text a human or an LLM reads to verify a pair,
+    so a review set built on it would have been judging fragments.
+    """
+
+    def test_a_trailing_abbreviation_does_not_end_the_sentence(self):
+        q = _match_question({"description":
+            "This market will settle to Yes if Arizona St. advances to the "
+            "2026-27 College Football Playoff. Further terms apply.",
+            "question": "fallback"})
+        assert q.startswith("Arizona St. advances")
+
+    def test_initials_do_not_end_the_sentence(self):
+        q = _match_question({"description":
+            "This market will settle to Yes if A.J. Brown records 1+ touchdowns "
+            "(excluding passing touchdowns) in the game. Overtime is included.",
+            "question": "fallback"})
+        assert "A.J. Brown records" in q
+        # the qualifier is the whole point of reading the question
+        assert "excluding passing touchdowns" in q
+
+    def test_a_normal_first_sentence_is_still_just_the_first(self):
+        q = _match_question({"description":
+            "This market will settle to Yes if Spain wins the 2026 FIFA World "
+            "Cup. Extra time counts.", "question": "fallback"})
+        assert q == "Spain wins the 2026 FIFA World Cup."
