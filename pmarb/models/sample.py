@@ -19,7 +19,14 @@ from datetime import datetime
 
 # Why a row exists, mirroring pmarb.main. `None` means the source did not record
 # a reason (every Phase 1 JSONL row, which predates the field).
-HEARTBEAT, EDGE_CHANGE, VIABLE, WINDOW_CLOSE = 0, 1, 2, 3
+#
+# UNSUBSCRIBED is a close marker written by the daily match refresh when a pair
+# is dropped while its window is still open (the game settled, the market
+# delisted). It is deliberately NOT WINDOW_CLOSE: that reason means "an
+# evaluation found the edge gone", which is an observation, whereas this one
+# means "we stopped looking", which is censoring. Conflating them would let the
+# survival curve read our own unsubscribe as the market closing the window.
+HEARTBEAT, EDGE_CHANGE, VIABLE, WINDOW_CLOSE, UNSUBSCRIBED = 0, 1, 2, 3, 4
 
 
 @dataclass(frozen=True, slots=True)

@@ -23,12 +23,21 @@ ended, the market delisted, the database was down — then what happened is
 unknown, and counting it as "closed" would manufacture a decay that was really
 the edge of the dataset. Those are reported separately and excluded from the
 rate, the same discipline the funnel uses for unreviewed pairs.
+
+An UNSUBSCRIBED row is the same kind of edge, deliberately marked as such: the
+daily match refresh dropped the pair while the window was open, so the window
+has an end (which is what pins its duration) but nobody observed the edge
+disappear. Reading it as an observed close would report OUR OWN unsubscribe as
+market decay, which is why the collector writes it under a reason of its own
+rather than reusing the window-close marker.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+
+from pmarb.models.sample import UNSUBSCRIBED
 
 # Deltas worth reporting. The small ones bracket this stack's own measured
 # latency (p50 ~0.2ms, p99 ~5ms); the large ones are what a human or a slower
@@ -84,6 +93,14 @@ def survival_curve(rows, deltas_ms=DEFAULT_DELTAS_MS) -> list[SurvivalPoint]:
                     state = s
                 else:
                     break
+            # Our own unsubscribe, not the market's doing: the pair was still
+            # viable when the refresh dropped it, so its fate at the target is
+            # unknowable and counting the marker as a close would manufacture
+            # decay. Same treatment as running out of data, because it IS
+            # running out of data — just at a boundary we created.
+            if state is not None and state.sample_reason == UNSUBSCRIBED:
+                censored += 1
+                continue
             still_open = state is not None and _viable(state)
             # Censoring applies only to a window that was STILL OPEN when the
             # data ran out — there, whether it would have survived to the target

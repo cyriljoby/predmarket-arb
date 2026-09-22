@@ -130,6 +130,38 @@ def _frontier_cells(frontier) -> tuple:
     return tuple(cell for point in frontier for cell in point)
 
 
+def close_marker_row(match_pair_id: int, reason: int, observed_at: datetime,
+                     yes_venue: str) -> tuple:
+    """A row that says only "this pair's window ends here", with no measurement.
+
+    Written by the daily match refresh for a pair that is dropped while still
+    viable. Without it the window never closes: `was_viable` is the only thing
+    that triggers a close marker, so a pair pruned mid-window leaves `closed_at`
+    unpinned and the next viable sample after a re-add reads as a NEW window —
+    one window becomes two, both with wrong durations.
+
+    Every price, fee and spread column is NULL or zero DELIBERATELY. There was no
+    evaluation at this instant — the market is gone — so any number here would be
+    invented, and a fabricated spread is worse than an absent one. `fillable_size`
+    0 and `spread_fee_adj` 0 make the row read as not-viable, which is the one
+    thing it does assert; `reason` (UNSUBSCRIBED) says why the rest is missing.
+
+    `yes_venue` is NOT NULL in the schema and is carried from the pair's LAST
+    evaluation rather than guessed: it records which direction the window that is
+    being closed was running.
+    """
+    return (
+        match_pair_id, observed_at, reason, yes_venue,
+        None, None, None, None,      # tops and fills: never observed
+        None, None,                  # fees: no fill price to compute them on
+        0.0, 0.0, 0.0,               # spreads: the only claim is "not viable"
+        0,                           # fillable_size
+        *((None,) * 6),              # frontier: no walk happened
+        None, None,                  # resolution dates: not re-read here
+        None, None,                  # latencies: no update triggered this
+    )
+
+
 def to_row(ev, match_pair_id: int, reason: int, observed_at: datetime,
            resolution_a: datetime | None, resolution_b: datetime | None,
            detect_latency_ms: float | None = None,

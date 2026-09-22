@@ -73,3 +73,31 @@ KALSHI_FEE_COEFFICIENT = 0.07
 
 POLY_US_TAKER_THETA = 0.05      # taker pays:   0.05 * p * (1 - p) per contract
 POLY_US_MAKER_THETA = -0.0125   # maker rebate (negative = credited back); Phase 2
+
+# --- daily match-set refresh ----------------------------------------------- #
+# Hour (UTC) at which the collector re-discovers both catalogs, adds
+# newly-listed markets and drops settled ones, in process.
+#
+# 78% of tracked pairs are tied to a single game (props 3,042 + lines 2,134 +
+# structured 626 of 7,393), so the match set decays DAILY: discovery ran once at
+# startup and `books` sat at 14,780 for 14 days, which means settled games were
+# still subscribed — the mechanism behind the stale-book artifacts (NASCAR at
+# 83c, F1 constructors at 81c on post-event books).
+#
+# 11:00 UTC is 07:00 US Eastern: after overnight settlement has swept the
+# previous slate, before the day's slate lists, and the quiet hour with the
+# fewest live windows for a resubscribe to disturb.
+MATCH_REFRESH_HOUR_UTC = 11
+
+# How long a venue gets to acknowledge a live subscription mutation before the
+# refresh gives up on it and reconnects that connection with the corrected list.
+# A refresh that believes it succeeded while the venue ignored it is the same
+# failure class as the subscription-cap bug that ran healthy-looking for two
+# hours, so every mutation is verified and an unverified one is never assumed.
+SUBSCRIPTION_ACK_TIMEOUT_SECONDS = 10.0
+
+# Polymarket acks an `unsubscribe` but says NOTHING on a successful subscribe —
+# only a later `error` frame reveals a rejection (that is how 75% of a
+# subscription set was once lost silently). So after a resync's subscribes, the
+# shard is watched for this long and any new error frame condemns the mutation.
+SUBSCRIBE_ERROR_GRACE_SECONDS = 3.0

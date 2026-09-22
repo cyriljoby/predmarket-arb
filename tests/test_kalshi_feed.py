@@ -335,3 +335,191 @@ class TestLineExtraction:
     def test_a_non_greater_strike_is_refused(self):
         assert _line_event(
             self._market(strike_type="less"), self.EVENT) is None
+
+
+class TestResync:
+    """Mutating a LIVE subscription, against a fake socket.
+
+    Verified live 2026-09-21: `update_subscription` with `delete_markets` /
+    `add_markets` on the subscribe ack's `sid` is honoured and leaves `seq`
+    monotonic. That is what makes the daily refresh in-process — a restart would
+    drop `last_append`, and `was_viable` there is the only thing that closes an
+    open window.
+    """
+
+    class _MutableWS:
+        """A socket that answers control frames the way the venue does.
+
+        `ok` acks carry `seq` from the SAME counter as book frames (verified:
+        acks took 53 and 54 between book frames 52 and 55), so this fake
+        interleaves them — a reader that only advanced `seq` on book frames would
+        see a gap here and resnapshot everything.
+        """
+
+        def __init__(self, *, ack=True, sid=7):
+            self.sent = []
+            self.closed = False
+            self._ack = ack
+            self._sid = sid
+            self._seq = 0
+            self._q: asyncio.Queue = asyncio.Queue()
+            self.subscribed: set = set()
+
+        def _next_seq(self):
+            self._seq += 1
+            return self._seq
+
+        async def send(self, raw):
+            import json
+            msg = json.loads(raw)
+            self.sent.append(msg)
+            params = msg.get("params") or {}
+            if msg.get("cmd") == "subscribe":
+                self.subscribed = set(params.get("market_tickers") or [])
+                await self._q.put({"type": "subscribed", "id": msg["id"],
+                                   "msg": {"channel": "orderbook_delta",
+                                           "sid": self._sid}})
+                return
+            if msg.get("cmd") == "update_subscription" and self._ack:
+                tickers = set(params.get("market_tickers") or [])
+                if params.get("action") == "delete_markets":
+                    self.subscribed -= tickers
+                else:
+                    self.subscribed |= tickers
+                await self._q.put({
+                    "type": "ok", "id": msg["id"], "sid": self._sid,
+                    "seq": self._next_seq(),
+                    "msg": {"market_tickers": sorted(self.subscribed)},
+                })
+
+        async def push_book(self, ticker):
+            await self._q.put({
+                "type": "orderbook_snapshot", "seq": self._next_seq(),
+                "msg": {"market_ticker": ticker, "yes_dollars_fp": [],
+                        "no_dollars_fp": [["0.30", "40.0"]]},
+            })
+
+        async def recv(self):
+            import json
+            return json.dumps(await self._q.get())
+
+        async def close(self):
+            self.closed = True
+
+    def _feed_and_markets(self, monkeypatch, ws, tickers):
+        from pmarb.feeds import kalshi as kmod
+        markets = [
+            kmod._market_metadata(
+                {"ticker": t, "title": "Q", "close_time": "2026-09-01T00:00:00Z"},
+                OBSERVED)
+            for t in tickers
+        ]
+        monkeypatch.setattr(kmod.websockets, "connect",
+                            lambda *a, **k: TestStreamBooks._FakeConnect(ws))
+        monkeypatch.setattr(kmod, "kalshi_headers", lambda *a, **k: {})
+        feed = KalshiFeed.__new__(KalshiFeed)
+        feed._creds = object()
+        feed._init_stream_state()
+        return feed, markets
+
+    def _drive(self, monkeypatch, tickers, body, *, ack=True):
+        """Run a live stream in the background and hand `body` the feed."""
+        ws = self._MutableWS(ack=ack)
+        feed, markets = self._feed_and_markets(monkeypatch, ws, tickers)
+        seen = []
+
+        async def go():
+            async def read():
+                async for mk in feed.stream_books(markets, reconnect=False,
+                                                  idle_timeout=5.0):
+                    seen.append(mk.id)
+
+            task = asyncio.create_task(read())
+            # Let the subscribe ack land: the `sid` it carries is what a mutation
+            # has to name, and the current code used to throw it away.
+            await ws.push_book(tickers[0])
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if feed._sid is not None and seen:
+                    break
+            out = await body(feed, ws, markets)
+            task.cancel()
+            return out
+
+        return asyncio.run(asyncio.wait_for(go(), timeout=5.0)), ws, seen
+
+    def test_the_subscribe_ack_sid_is_captured(self, monkeypatch):
+        async def body(feed, ws, markets):
+            return feed._sid
+
+        sid, _, _ = self._drive(monkeypatch, ["A", "B"], body)
+        assert sid == 7
+
+    def test_drops_and_adds_are_sent_on_the_live_sid(self, monkeypatch):
+        async def body(feed, ws, markets):
+            from pmarb.feeds import kalshi as kmod
+            keep = markets[0]
+            new = kmod._market_metadata(
+                {"ticker": "C", "title": "Q",
+                 "close_time": "2026-09-01T00:00:00Z"}, OBSERVED)
+            return await feed.resync([keep, new])
+
+        out, ws, _ = self._drive(monkeypatch, ["A", "B"], body)
+        assert out == {"added": 1, "dropped": 1, "applied": "live"}
+        mutations = [m for m in ws.sent if m.get("cmd") == "update_subscription"]
+        assert [m["params"]["action"] for m in mutations] == [
+            "delete_markets", "add_markets"]
+        assert mutations[0]["params"] == {
+            "sids": [7], "market_tickers": ["B"], "action": "delete_markets"}
+        assert mutations[1]["params"]["market_tickers"] == ["C"]
+        # Distinct command ids, because the ack is matched by id — reusing 1
+        # would collide with the subscribe.
+        assert {m["id"] for m in mutations} == {2, 3}
+
+    def test_a_dropped_ticker_stops_being_yielded(self, monkeypatch):
+        # Even if the venue keeps sending it: the reader filters on the desired
+        # set, so a stale book cannot reach the detector.
+        async def body(feed, ws, markets):
+            await feed.resync([markets[0]])
+            await ws.push_book("B")
+            for _ in range(10):
+                await asyncio.sleep(0)
+            return set(feed._pruned)
+
+        pruned, _, seen = self._drive(monkeypatch, ["A", "B"], body)
+        assert seen == ["kalshi:A"]
+        # And the reader forgot its maintained ladders: that dict is the reader's
+        # own, so a resync can only ask, and an unserviced ask would grow memory
+        # by a slate per refresh.
+        assert pruned == set()
+
+    def test_an_unacknowledged_mutation_falls_back_to_a_reconnect(self, monkeypatch):
+        # The one thing that must never happen is a refresh believing it
+        # succeeded while the venue ignored it. No ack -> tear the socket down and
+        # let the stream's own reconnect resubscribe the corrected list.
+        async def body(feed, ws, markets):
+            return await feed.resync([markets[0]], ack_timeout=0.05)
+
+        out, ws, _ = self._drive(monkeypatch, ["A", "B"], body, ack=False)
+        assert out["applied"] == "reconnect"
+        assert ws.closed is True
+        # The venue never applied it, which is exactly why the reconnect is not
+        # optional: the socket still believes it holds both tickers.
+        assert ws.subscribed == {"A", "B"}
+
+    def test_the_desired_set_survives_a_failed_mutation(self, monkeypatch):
+        async def body(feed, ws, markets):
+            await feed.resync([markets[0]], ack_timeout=0.05)
+            return list(feed._meta)
+
+        out, _, _ = self._drive(monkeypatch, ["A", "B"], body, ack=False)
+        assert out == ["A"]
+
+    def test_resync_without_a_socket_defers_to_the_next_connect(self):
+        feed = KalshiFeed.__new__(KalshiFeed)
+        feed._creds = object()
+        feed._init_stream_state()
+        feed._meta = {"A": object()}
+        out = asyncio.run(feed.resync([]))
+        assert out == {"added": 0, "dropped": 1, "applied": "on_reconnect"}
+        assert feed._meta == {}

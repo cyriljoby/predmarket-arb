@@ -454,3 +454,190 @@ class TestQuestionIsNotTruncatedAtAnAbbreviation:
             "This market will settle to Yes if Spain wins the 2026 FIFA World "
             "Cup. Extra time counts.", "question": "fallback"})
         assert q == "Spain wins the 2026 FIFA World Cup."
+
+
+class TestResync:
+    """Mutating live subscriptions, against a fake socket.
+
+    Verified live 2026-09-21: `{"unsubscribe": {"requestId": rid}}` — requestId
+    and NOTHING else, any extra field is rejected with `invalid_message` — is
+    honoured AND frees cap slots. There is no per-slug removal, so the removable
+    unit is whatever one subscribe call covered, which is what makes a partly-dead
+    batch the interesting case.
+    """
+
+    class _MutableWS:
+        def __init__(self, *, ack=True):
+            self.sent = []
+            self.closed = False
+            self._ack = ack
+            self._q: asyncio.Queue = asyncio.Queue()
+            self.live: dict[str, list] = {}   # requestId -> slugs, venue-side
+
+        async def send(self, raw):
+            import json
+            msg = json.loads(raw)
+            self.sent.append(msg)
+            if "subscribe" in msg:
+                sub = msg["subscribe"]
+                self.live[sub["requestId"]] = list(sub["marketSlugs"])
+                return
+            rid = msg["unsubscribe"]["requestId"]
+            if self._ack:
+                self.live.pop(rid, None)
+                await self._q.put({"requestId": rid, "unsubscribed": True})
+
+        async def push_book(self, slug):
+            await self._q.put({"marketData": {"marketSlug": slug, **MARKET_DATA}})
+
+        async def push_error(self, text):
+            await self._q.put({"error": text})
+
+        async def recv(self):
+            import json
+            return json.dumps(await self._q.get())
+
+        async def close(self):
+            self.closed = True
+
+    def _markets(self, slugs):
+        from pmarb.feeds import polymarket as pmod
+        return [pmod._market_metadata({**MARKET, "slug": s}, OBSERVED)
+                for s in slugs]
+
+    def _drive(self, monkeypatch, slugs, body, *, ack=True, batch=None):
+        """Run one live shard in the background and hand `body` the feed."""
+        from pmarb.feeds import polymarket as pmod
+
+        ws = self._MutableWS(ack=ack)
+        monkeypatch.setattr(pmod.websockets, "connect",
+                            lambda *a, **k: TestStreamBooks._FakeConnect(ws))
+        monkeypatch.setattr(pmod, "polymarket_us_headers", lambda *a, **k: {})
+        feed = PolymarketUSFeed.__new__(PolymarketUSFeed)
+        feed._creds = None
+        feed._init_stream_state()
+        if batch is not None:
+            feed._SUB_BATCH = batch
+        markets = self._markets(slugs)
+        seen = []
+
+        async def go():
+            async def read():
+                async for mk in feed.stream_books(markets, reconnect=False,
+                                                  idle_timeout=5.0):
+                    seen.append(mk.id)
+
+            task = asyncio.create_task(read())
+            await ws.push_book(slugs[0])
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if seen:
+                    break
+            out = await body(feed, ws, markets)
+            task.cancel()
+            return out
+
+        return asyncio.run(asyncio.wait_for(go(), timeout=5.0)), ws, seen
+
+    def test_a_fully_dead_batch_is_just_unsubscribed(self, monkeypatch):
+        # One subscribe per slug here, so dropping one touches nothing else.
+        async def body(feed, ws, markets):
+            return await feed.resync([markets[0]], error_grace=0.0)
+
+        out, ws, _ = self._drive(monkeypatch, ["a", "b"], body, batch=1)
+        assert out["dropped"] == 1 and out["applied"] == "live"
+        unsubs = [m for m in ws.sent if "unsubscribe" in m]
+        assert len(unsubs) == 1
+        assert list(ws.live.values()) == [["a"]]
+        # requestId ALONE — extra fields are rejected by the strict unmarshal.
+        assert set(unsubs[0]["unsubscribe"]) == {"requestId"}
+
+    def test_a_partly_dead_batch_is_torn_down_and_its_survivors_resubscribed(
+            self, monkeypatch):
+        # The awkward case: removal granularity is a whole subscribe batch, so
+        # the survivors pay a brief gap. Acceptable only because Poly sends full
+        # snapshots — the next message is a complete book, and the staleness gate
+        # discards the interval rather than trusting it.
+        async def body(feed, ws, markets):
+            return await feed.resync(markets[:2], error_grace=0.0)
+
+        out, ws, _ = self._drive(monkeypatch, ["a", "b", "c"], body, batch=3)
+        assert out["dropped"] == 1
+        subs = [m["subscribe"] for m in ws.sent if "subscribe" in m]
+        assert subs[0]["marketSlugs"] == ["a", "b", "c"]     # the original batch
+        assert subs[1]["marketSlugs"] == ["a", "b"]          # survivors, re-sent
+        assert subs[1]["requestId"] != subs[0]["requestId"]  # a NEW handle
+        assert list(ws.live.values()) == [["a", "b"]]
+
+    def test_added_slugs_go_onto_a_shard_with_headroom(self, monkeypatch):
+        async def body(feed, ws, markets):
+            new = self._markets(["c"])
+            out = await feed.resync(markets + new, error_grace=0.0)
+            return out, list(feed._shards[0].meta_by_slug)
+
+        (out, meta), ws, _ = self._drive(monkeypatch, ["a", "b"], body, batch=2)
+        assert out["added"] == 1 and out["new_shards"] == 0
+        assert meta == ["a", "b", "c"]
+        assert [m["subscribe"]["marketSlugs"] for m in ws.sent
+                if "subscribe" in m] == [["a", "b"], ["c"]]
+
+    def test_overflowing_the_cap_starts_a_new_shard(self, monkeypatch):
+        # The venue counts subscriptions per CONNECTION (2,000 hard), so growth
+        # past the cap is only possible by adding a connection.
+        async def body(feed, ws, markets):
+            feed._MAX_SUBS_PER_CONN = 2
+            out = await feed.resync(markets + self._markets(["c"]),
+                                    error_grace=0.0)
+            return out, [list(sh.meta_by_slug) for sh in feed._shards]
+
+        (out, shards), _, _ = self._drive(monkeypatch, ["a", "b"], body, batch=2)
+        assert out["new_shards"] == 1
+        assert shards == [["a", "b"], ["c"]]
+
+    def test_an_unacknowledged_unsubscribe_recycles_the_shard(self, monkeypatch):
+        # An unsubscribe that is not confirmed may have freed nothing, and a shard
+        # that believes it has headroom it does not have is how the cap bug
+        # started. So: reconnect this shard with the corrected list.
+        async def body(feed, ws, markets):
+            return await feed.resync([markets[0]], ack_timeout=0.05,
+                                     error_grace=0.0)
+
+        out, ws, _ = self._drive(monkeypatch, ["a", "b"], body, ack=False,
+                                 batch=1)
+        assert out["applied"] == "recycled" and out["recycled"] == 1
+        assert ws.closed is True
+
+    def test_an_error_frame_after_subscribing_recycles_the_shard(self, monkeypatch):
+        # Poly acks an unsubscribe but says NOTHING on a successful subscribe, so
+        # a refused one arrives only as a later error frame. Watching for it is
+        # the only honest verification available.
+        async def body(feed, ws, markets):
+            new = self._markets(["c"])
+
+            async def erupt():
+                await ws.push_error("max subscriptions per connection reached")
+
+            asyncio.get_running_loop().create_task(erupt())
+            return await feed.resync(markets + new, error_grace=0.05)
+
+        out, ws, _ = self._drive(monkeypatch, ["a", "b"], body, batch=2)
+        assert out["applied"] == "recycled"
+        assert ws.closed is True
+
+    def test_a_dropped_slug_stops_being_yielded(self, monkeypatch):
+        async def body(feed, ws, markets):
+            await feed.resync([markets[0]], error_grace=0.0)
+            await ws.push_book("b")
+            for _ in range(10):
+                await asyncio.sleep(0)
+            return None
+
+        _, _, seen = self._drive(monkeypatch, ["a", "b"], body, batch=1)
+        assert seen == ["polymarket_us:a"]
+
+    def test_resync_without_a_stream_defers_to_the_next_connect(self):
+        feed = PolymarketUSFeed.__new__(PolymarketUSFeed)
+        feed._creds = None
+        feed._init_stream_state()
+        out = asyncio.run(feed.resync(self._markets(["a"])))
+        assert out["applied"] == "on_reconnect"

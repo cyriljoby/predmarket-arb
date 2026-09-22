@@ -13,6 +13,7 @@ unit-testable against synthetic books.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -28,6 +29,7 @@ from pmarb.config import (
     RECONNECT_BASE_SECONDS,
     RECONNECT_MAX_SECONDS,
     STREAM_IDLE_TIMEOUT_SECONDS,
+    SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
 )
 from pmarb.credentials import KalshiCredentials
 from pmarb.feeds._util import is_entity as _is_entity
@@ -35,6 +37,7 @@ from pmarb.feeds._util import now_utc as _now_utc
 from pmarb.feeds._util import parse_iso_dt as _parse_dt
 from pmarb.feeds._util import to_float as _to_float
 from pmarb.feeds.auth import kalshi_headers
+from pmarb.feeds.base import SubscriptionMutationError
 from pmarb.models import (
     FuturesEvent,
     LineEvent,
@@ -411,6 +414,28 @@ class KalshiFeed:
     ):
         self._session = session
         self._creds = credentials  # required only for stream_books (WS is authed)
+        self._init_stream_state()
+
+    def _init_stream_state(self) -> None:
+        """Live-subscription state, owned by stream_books and read by resync.
+
+        `_meta` is the authoritative desired set: the reader filters yields
+        through it, and every (re)subscribe is built from it, so a mutation
+        recorded here takes effect whether the socket is up or not.
+
+        Called from stream_books as well as __init__ so a stream always starts
+        from a clean slate (no ack waiter left over from a previous stream).
+        """
+        self._meta: dict[str, Market] = {}
+        self._ws = None            # the open socket, or None between connects
+        self._sid: int | None = None   # subscription id from the `subscribed` ack
+        self._cmd_id = 1           # `id` counter; 1 is the initial subscribe
+        self._acks: dict[int, asyncio.Future] = {}
+        # Tickers a resync dropped, for the reader to forget. The maintained bid
+        # ladders live in the reader's own `books` dict, which resync cannot
+        # reach, and leaving a settled game's ladders there would grow memory by
+        # a day's slate on every refresh.
+        self._pruned: set[str] = set()
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
         async with self._session.get(
@@ -488,23 +513,34 @@ class KalshiFeed:
         """
         if self._creds is None:
             raise RuntimeError("Kalshi stream_books requires credentials")
-        meta = {
+        self._init_stream_state()
+        meta = self._meta = {
             m.raw["market"]["ticker"]: m
             for m in markets
             if m.raw.get("market", {}).get("ticker")
         }
-        tickers = list(meta)
 
         backoff = RECONNECT_BASE_SECONDS
         while True:
+            # Read INSIDE the loop: a resync may have mutated `_meta` while the
+            # socket was down (or failed to mutate it live and asked for a
+            # reconnect), and a resubscribe must use the corrected set.
+            tickers = list(meta)
             # books: ticker -> {"yes": {price_str: size}, "no": {price_str: size}}
             books: dict[str, dict[str, dict[str, float]]] = {}
             last_seq: int | None = None
+            # No socket until the connect below succeeds. Any mutation waiting on
+            # an ack from the previous one will never get it, so it is failed
+            # rather than left hanging — an unanswered mutation must surface as a
+            # failure, never as optimism.
+            self._ws, self._sid = None, None
+            self._fail_pending_acks()
             try:
                 headers = kalshi_headers(self._creds, "GET", _WS_PATH)
                 async with websockets.connect(
                     _WS_URL, additional_headers=headers
                 ) as ws:
+                    self._ws, self._sid = ws, None
                     await ws.send(json.dumps({
                         "id": 1, "cmd": "subscribe",
                         "params": {
@@ -529,6 +565,10 @@ class KalshiFeed:
                         # rather than starting the clock after the easy part.
                         received_mono = time.monotonic()
                         backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
+                        if self._pruned:
+                            for gone in self._pruned:
+                                books.pop(gone, None)
+                            self._pruned.clear()
                         msg = json.loads(raw)
                         typ = msg.get("type")
                         # Tracked BEFORE the book-frame filter: control acks
@@ -544,6 +584,17 @@ class KalshiFeed:
                                 break  # gap -> reconnect & resnapshot
                             last_seq = seq
                         if typ not in ("orderbook_snapshot", "orderbook_delta"):
+                            # Control traffic. Two things here are load-bearing:
+                            # the `sid` (without it no live mutation can name
+                            # this subscription) and the reply to a mutation,
+                            # which is the only proof the venue applied it.
+                            if typ == "subscribed":
+                                self._sid = (msg.get("msg") or {}).get("sid")
+                            cmd_id = msg.get("id")
+                            fut = (self._acks.pop(cmd_id, None)
+                                   if cmd_id is not None else None)
+                            if fut is not None and not fut.done():
+                                fut.set_result(msg)
                             continue  # 'subscribed' ack, errors, etc.
                         body = msg.get("msg") or {}
                         ticker = body.get("market_ticker")
@@ -581,3 +632,130 @@ class KalshiFeed:
                     raise
                 await asyncio.sleep(backoff)  # capped exponential backoff
                 backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)
+
+    # --- live subscription mutation ---------------------------------------- #
+    def _fail_pending_acks(self) -> None:
+        for fut in self._acks.values():
+            if not fut.done():
+                fut.set_exception(SubscriptionMutationError(
+                    "connection closed before the venue acknowledged"))
+        self._acks.clear()
+
+    async def _mutate(self, ws, tickers: list[str], action: str,
+                      timeout: float) -> None:
+        """Send one `update_subscription` and VERIFY the venue applied it.
+
+        Shape verified live 2026-09-21: the reply is
+        `{"type":"ok","id":n,"sid":1,"seq":53,"msg":{"market_tickers":[...]}}`,
+        where the list is the subscription's contents AFTER the change. Those
+        acks consume numbers in the same `seq` counter as book frames, which is
+        why the reader advances `last_seq` on control frames too (commit
+        124ed19) — counting only book frames reads an ack as a gap and
+        resnapshots all ~7,400 tickers.
+
+        Raises SubscriptionMutationError on anything other than a reply that
+        demonstrates the change, including silence. An unverified mutation is
+        treated as a failure on purpose: the caller's fallback (reconnect with
+        the corrected list) is cheap, and a refresh that believes it succeeded
+        while the venue ignored it is the failure mode this whole path exists to
+        avoid.
+        """
+        self._cmd_id += 1
+        cmd_id = self._cmd_id
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._acks[cmd_id] = fut
+        try:
+            await ws.send(json.dumps({
+                "id": cmd_id, "cmd": "update_subscription",
+                "params": {"sids": [self._sid], "market_tickers": tickers,
+                           "action": action},
+            }))
+            try:
+                reply = await asyncio.wait_for(fut, timeout=timeout)
+            except TimeoutError:
+                raise SubscriptionMutationError(
+                    f"{action} of {len(tickers)} tickers unacknowledged after "
+                    f"{timeout:.0f}s") from None
+        finally:
+            self._acks.pop(cmd_id, None)
+        if reply.get("type") != "ok":
+            raise SubscriptionMutationError(f"{action} rejected: {reply}")
+        # The echoed membership is checked when present: an `ok` that left the
+        # set unchanged is the silent-no-op case, and it must not pass.
+        echoed = (reply.get("msg") or {}).get("market_tickers")
+        if echoed is None:
+            return
+        after = set(echoed)
+        if action == "delete_markets" and (still := after & set(tickers)):
+            raise SubscriptionMutationError(
+                f"delete_markets acked but {len(still)} tickers are still "
+                f"subscribed")
+        if action == "add_markets" and (missing := set(tickers) - after):
+            raise SubscriptionMutationError(
+                f"add_markets acked but {len(missing)} tickers are absent")
+
+    async def resync(
+        self, markets: list[Market], *,
+        ack_timeout: float = SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Make the LIVE subscription cover exactly `markets`, no reconnect.
+
+        Per-ticker mutation on an open socket is verified to work and to leave
+        `seq` monotonic (probe 2026-09-21: 5/5 added tickers streamed
+        immediately, 5/5 dropped went quiet, no sequence reset), which is what
+        makes an in-process refresh worth doing at all — a restart would drop
+        `last_append` and with it every open window's close marker.
+
+        `_meta` is updated BEFORE anything is sent, for two reasons: a dropped
+        ticker stops being yielded immediately even if the venue keeps sending
+        it, and if the mutation fails the reconnect that follows resubscribes
+        the corrected set rather than the stale one.
+
+        Returns a summary with `applied`:
+            "live"          mutated in place and verified;
+            "reconnect"     the venue did not confirm; socket torn down so the
+                            stream's own reconnect applies the new list;
+            "on_reconnect"  no socket right now; the next connect picks it up.
+        """
+        desired = {
+            m.raw["market"]["ticker"]: m
+            for m in markets
+            if m.raw.get("market", {}).get("ticker")
+        }
+        added = [t for t in desired if t not in self._meta]
+        dropped = [t for t in self._meta if t not in desired]
+        # Rebuild in place: `_meta` is captured by the running stream loop, so a
+        # fresh dict would be written to a name nothing reads. Fresh metadata
+        # wins for surviving tickers — venues amend titles and settlement dates.
+        self._meta.clear()
+        self._meta.update(desired)
+        self._pruned.update(dropped)
+        out = {"added": len(added), "dropped": len(dropped), "applied": "live"}
+        if not added and not dropped:
+            out["applied"] = "unchanged"
+            return out
+
+        ws, sid = self._ws, self._sid
+        if ws is None or sid is None:
+            out["applied"] = "on_reconnect"
+            return out
+        try:
+            # Drop first: it is the half that frees the venue's resources, and
+            # on Kalshi there is no cap to race, so order only matters for
+            # keeping the subscription from briefly holding both sets.
+            if dropped:
+                await self._mutate(ws, dropped, "delete_markets", ack_timeout)
+            if added:
+                await self._mutate(ws, added, "add_markets", ack_timeout)
+        except (SubscriptionMutationError, websockets.ConnectionClosed,
+                OSError) as exc:
+            print(f"  WARNING {self.platform} live resubscribe failed ({exc}); "
+                  f"reconnecting with the corrected list "
+                  f"(+{len(added)}/-{len(dropped)})")
+            out["applied"] = "reconnect"
+            # Closing makes the reader's recv raise, which lands in the stream's
+            # own reconnect path — the same recovery a network drop takes, and
+            # already proven by 14 days of uptime.
+            with contextlib.suppress(Exception):
+                await ws.close()
+        return out

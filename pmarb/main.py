@@ -13,7 +13,6 @@ Run:  .venv/bin/python -m pmarb.main [DURATION_SECONDS]
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import time
 import traceback
@@ -41,15 +40,18 @@ from pmarb.feeds.kalshi import KalshiFeed
 from pmarb.feeds.polymarket import PolymarketUSFeed
 from pmarb.latency import LatencyHistogram
 from pmarb.oplog import LatestOpportunityLog, OpportunityLogger
-
-# Only stream the trustworthy tiers — lexical is noise (see multi-outcome guard).
-_TRUSTED = {"structured", "futures", "line", "prop"}
-
+from pmarb.refresh import MatchSetRefresher, load_trusted_matches
+from pmarb.refresh import fetch_with_retry as _fetch_with_retry
 
 # Why a row exists. Persisted on every observation, because "no row" and "a row
 # we chose not to write" are different facts and the difference is what made
 # Phase 1's futures numbers floors rather than measurements.
-HEARTBEAT, EDGE_CHANGE, VIABLE, WINDOW_CLOSE = 0, 1, 2, 3
+#
+# UNSUBSCRIBED (4) is written by the daily refresh, not by this loop: see
+# pmarb/refresh.py. It closes a window the refresh removed, and is a separate
+# reason from WINDOW_CLOSE because "we stopped looking" is censoring while
+# "an evaluation found the edge gone" is an observation.
+HEARTBEAT, EDGE_CHANGE, VIABLE, WINDOW_CLOSE, UNSUBSCRIBED = 0, 1, 2, 3, 4
 
 
 def sample_reason(
@@ -114,32 +116,13 @@ def oriented(poly, match: dict):
                    yes_bid=poly.no_bid, no_bid=poly.yes_bid)
 
 
-async def _fetch_with_retry(feed, attempts: int = 8):
-    """Startup market discovery over REST — retry transient network failures
-    (connection resets, DNS blips, gateway 5xx) so a blip at launch doesn't
-    kill an unattended run."""
-    backoff = RECONNECT_BASE_SECONDS
-    for attempt in range(1, attempts + 1):
-        try:
-            return await feed.fetch_markets()
-        except (TimeoutError, aiohttp.ClientError, OSError) as exc:
-            if attempt == attempts:
-                raise
-            print(f"  {feed.platform} fetch_markets failed "
-                  f"({type(exc).__name__}: {exc}); retry in {backoff:.0f}s "
-                  f"[{attempt}/{attempts}]")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)
-
-
 async def run(duration: float | None) -> None:
     kcreds = KalshiCredentials.from_env()
     pcreds = PolymarketUSCredentials.from_env()
 
-    matches = [
-        m for m in json.load(open(MATCH_LOG_PATH))
-        if m.get("match_method") in _TRUSTED
-    ]
+    # Same loader the daily refresh uses, so startup and every refresh after it
+    # agree on what "the tracked match set" means.
+    _all_matches, matches = load_trusted_matches(MATCH_LOG_PATH)
     # market id -> the matches it participates in (usually one)
     index: dict[str, list[dict]] = defaultdict(list)
     for m in matches:
@@ -186,7 +169,14 @@ async def run(duration: float | None) -> None:
         except Exception as exc:
             print(f"  WARNING Postgres unavailable ({type(exc).__name__}: {exc}); "
                   f"continuing with file sinks only")
-        # pair -> (last append time, last edge, was viable last evaluation)
+        # pair -> (last append time, last edge, was viable last evaluation,
+        #          which venue carried the YES leg then)
+        #
+        # `yes_venue` rides along because the daily refresh has to close any
+        # window still open on a pair it drops, and the close marker records the
+        # direction of the window it closes. That direction is only knowable from
+        # the last evaluation — reconstructing it at refresh time would mean
+        # re-running the detector on a book whose market no longer exists.
         last_append: dict[tuple, tuple] = {}
         stats = {"updates": 0, "windows": 0}
         # Every evaluation, not just the recorded ones: latency is a property of
@@ -273,8 +263,8 @@ async def run(duration: float | None) -> None:
                     is_viable = ev.estimated_fillable_size > 0
                     is_structured = match.get("match_method") == "structured"
                     key = (match["kalshi_id"], match["polymarket_id"])
-                    last_t, last_edge, was_viable = last_append.get(
-                        key, (0.0, None, False)
+                    last_t, last_edge, was_viable, _ = last_append.get(
+                        key, (0.0, None, False, "")
                     )
                     edge = round(ev.raw_spread_top_of_book, 4)
 
@@ -301,11 +291,13 @@ async def run(duration: float | None) -> None:
                                 ev, pid, reason, now,
                                 k.resolution_date, p.resolution_date,
                                 detect_ms, partner_age_ms))
-                        last_append[key] = (tmono, edge, is_viable)
+                        last_append[key] = (tmono, edge, is_viable,
+                                            ev.yes_platform)
                         if is_viable and not was_viable:
                             stats["windows"] += 1   # count WINDOWS, not samples
                     else:
-                        last_append[key] = (last_t, last_edge, is_viable)
+                        last_append[key] = (last_t, last_edge, is_viable,
+                                            ev.yes_platform)
 
         async def report() -> None:
             t0 = time.time()
@@ -324,10 +316,22 @@ async def run(duration: float | None) -> None:
                       f"windows={stats['windows']} tracked={latest_log.count}{db} "
                       f"{latency.summary()}")
 
+        # Daily match-set refresh. In process, never a restart: a restart drops
+        # `last_append`, and `was_viable` there is the only thing that closes an
+        # open window — see pmarb/refresh.py. It shares every structure the hot
+        # loop uses and mutates them in place, and it deliberately leaves the
+        # latency histogram and the counters alone.
+        refresher = MatchSetRefresher(
+            kfeed=kfeed, pfeed=pfeed, index=index, cache=cache,
+            last_append=last_append, pair_id=pair_id,
+            k_markets=k_mkts, p_markets=p_mkts,
+            writer=writer, latest_log=latest_log,
+        )
         tasks = [
             asyncio.create_task(consume(kfeed, k_mkts)),
             asyncio.create_task(consume(pfeed, p_mkts)),
             asyncio.create_task(report()),
+            asyncio.create_task(refresher.run()),
         ]
         try:
             if duration:

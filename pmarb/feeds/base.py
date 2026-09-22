@@ -14,6 +14,18 @@ from typing import Protocol, runtime_checkable
 from pmarb.models import Market
 
 
+class SubscriptionMutationError(RuntimeError):
+    """A venue did not confirm a live subscription change.
+
+    Raised rather than logged-and-ignored because the two look identical from
+    inside the process and only one of them is survivable: a refused
+    subscription arrives as silence, which is indistinguishable from an idle
+    market — that is exactly how a 75% subscription loss once ran
+    healthy-looking for two hours. Every caller answers this by reconnecting the
+    affected connection with the corrected list, never by assuming.
+    """
+
+
 @runtime_checkable
 class MarketDataFeed(Protocol):
     platform: str
@@ -31,5 +43,17 @@ class MarketDataFeed(Protocol):
 
         An async generator: `async for market in feed.stream_books(): ...`.
         This is what drives the detector in real time.
+        """
+        ...
+
+    async def resync(self, markets: list[Market]) -> dict:
+        """Change the LIVE subscription of a running `stream_books` to
+        `markets`, without restarting the stream.
+
+        The daily match refresh needs this because a restart destroys
+        `last_append`, and `was_viable` there is the only thing that pins an
+        open window's close. Implementations MUST verify the venue applied the
+        change and fall back to reconnecting the affected connection with the
+        corrected list when it did not.
         """
         ...

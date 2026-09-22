@@ -114,6 +114,21 @@ class LatestOpportunityLog:
             self._fh.write(json.dumps(rec) + "\n")
         self._fh.flush()
 
+    def prune(self, live: set) -> int:
+        """Forget every pair that is no longer tracked; returns how many.
+
+        Called by the daily match refresh. Without it a settled game keeps its
+        line in "what's open now" forever, and the dict grows for the life of the
+        process — the snapshot's whole point is that it is bounded by the live
+        pair count.
+        """
+        gone = [k for k in self._latest if k not in live]
+        for key in gone:
+            del self._latest[key]
+        if gone:
+            self._dump()
+        return len(gone)
+
     @property
     def count(self) -> int:
         return len(self._latest)  # distinct pairs currently open

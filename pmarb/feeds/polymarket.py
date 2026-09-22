@@ -14,11 +14,12 @@ market, the same trick the Kalshi feed uses.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 import aiohttp
@@ -28,10 +29,13 @@ from pmarb.config import (
     RECONNECT_BASE_SECONDS,
     RECONNECT_MAX_SECONDS,
     STREAM_IDLE_TIMEOUT_SECONDS,
+    SUBSCRIBE_ERROR_GRACE_SECONDS,
+    SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
 )
 from pmarb.credentials import PolymarketUSCredentials
 from pmarb.feeds._util import is_entity, now_utc, parse_iso_dt
 from pmarb.feeds.auth import polymarket_us_headers
+from pmarb.feeds.base import SubscriptionMutationError
 from pmarb.models import (
     FuturesEvent,
     LineEvent,
@@ -453,6 +457,36 @@ def _market_metadata(market: dict, observed_at: datetime) -> Market:
     )
 
 
+# --- live subscription state ------------------------------------------------ #
+@dataclass
+class _Shard:
+    """One connection's subscriptions, and everything a resync needs to change
+    them without reconnecting.
+
+    `batches` maps requestId -> the slugs ONE subscribe call covered, because
+    that is the removable unit: `unsubscribe` takes a requestId ALONE (verified
+    2026-09-21 — adding subscriptionType/marketSlugs is rejected with
+    `invalid_message`), so there is no per-slug removal to track instead.
+
+    `meta_by_slug` is the shard's authoritative desired set: the reader filters
+    yields through it and every resubscribe is built from it, so correcting it
+    is what makes a refresh survive a failed mutation.
+    """
+
+    index: int
+    meta_by_slug: dict[str, dict]
+    batches: dict[str, list[str]] = field(default_factory=dict)
+    ws: object | None = None          # open socket, or None between connects
+    errors: int = 0                   # error frames seen; a resync watches this
+    _rid_seq: int = 0
+
+    def mint_request_id(self) -> str:
+        """A requestId never reused on this shard: it is the handle an
+        unsubscribe names, so a duplicate would make removal ambiguous."""
+        self._rid_seq += 1
+        return f"pmarb-s{self.index}-{self._rid_seq}"
+
+
 # --- the feed adapter ------------------------------------------------------ #
 class PolymarketUSFeed:
     """Polymarket US adapter: public REST discovery + authenticated WS books."""
@@ -469,6 +503,17 @@ class PolymarketUSFeed:
     ):
         self._session = session
         self._creds = credentials
+        self._init_stream_state()
+
+    def _init_stream_state(self) -> None:
+        """Live-stream state, owned by stream_books and read/mutated by resync.
+
+        Called from stream_books too, so a stream always starts from a clean
+        slate rather than inheriting a previous one's shards or ack waiters.
+        """
+        self._shards: list[_Shard] = []
+        self._spawn_shard = None       # set while a stream is running
+        self._acks: dict[str, asyncio.Future] = {}   # requestId -> ack waiter
 
     @staticmethod
     def _is_tradeable(m: dict) -> bool:
@@ -518,7 +563,14 @@ class PolymarketUSFeed:
                   f"guard at {len(markets)} markets — catalog is TRUNCATED")
         return markets
 
-    _SUB_BATCH = 200  # max marketSlugs per subscribe message
+    # Max marketSlugs per subscribe message. The docs state a 100-markets-per-
+    # subscription cap which this exceeds and which the venue silently tolerates
+    # (verified again on 2026-09-21: 200-slug batches subscribe and stream).
+    # Left at 200 deliberately — but it is also the REMOVAL GRANULARITY, because
+    # `unsubscribe` is keyed by requestId alone and tears down whatever one
+    # subscribe call covered. A bigger batch means more innocent slugs churned
+    # when one of them settles.
+    _SUB_BATCH = 200
     # HARD VENUE LIMIT, discovered live: the 2001st subscription on a
     # connection is refused with {"error": "max subscriptions per connection
     # reached"}. Asking for more does not fail the socket — the extra batches
@@ -529,6 +581,10 @@ class PolymarketUSFeed:
     #
     # Margin below the cap because the venue counts subscriptions, not markets,
     # and a reconnect can briefly overlap the old ones.
+    #
+    # `unsubscribe` DOES free slots (verified 2026-09-21: 198/200 slugs silenced,
+    # then 200 brand-new slugs all streamed with no cap error), which is what
+    # lets a refresh recycle inventory instead of accumulating dead games.
     _MAX_SUBS_PER_CONN = 1_900
 
     async def stream_books(
@@ -542,37 +598,83 @@ class PolymarketUSFeed:
         match set is sharded and the shards are merged into one stream. Each
         shard reconnects independently: a drop costs that shard's books until it
         recovers, not the whole feed.
-        """
-        shards = [markets[i:i + self._MAX_SUBS_PER_CONN]
-                  for i in range(0, len(markets), self._MAX_SUBS_PER_CONN)]
-        if len(shards) <= 1:
-            async for mk in self._stream_shard(
-                    markets, reconnect=reconnect, idle_timeout=idle_timeout):
-                yield mk
-            return
 
-        print(f"  {self.platform}: {len(markets)} markets over {len(shards)} "
-              f"connections (cap {self._MAX_SUBS_PER_CONN}/conn)")
+        Every shard — including a single one — runs as its own task feeding one
+        queue. That uniformity is what lets `resync` start a NEW shard while the
+        stream is live (the day the match set grows past the current shards'
+        headroom) without a special case that only gets exercised in production.
+        A shard that ends is surfaced rather than swallowed: its exception is
+        re-raised here, which is how `reconnect=False` still propagates a closed
+        socket to the caller.
+        """
+        self._init_stream_state()
+        cap = self._MAX_SUBS_PER_CONN
+        self._shards = [
+            _Shard(i, self._meta_of(markets[j:j + cap]))
+            for i, j in enumerate(range(0, max(len(markets), 1), cap))
+        ]
         # Bounded: an unbounded queue would trade a silent subscription loss for
         # a silent memory leak. Poly sends full snapshots, so a dropped update is
         # superseded by the next one and the staleness gate covers the gap.
         queue: asyncio.Queue[Market] = asyncio.Queue(maxsize=10_000)
+        tasks: list[asyncio.Task] = []
 
-        async def pump(shard: list[Market]) -> None:
+        async def pump(shard: _Shard) -> None:
             async for mk in self._stream_shard(
                     shard, reconnect=reconnect, idle_timeout=idle_timeout):
                 await queue.put(mk)
 
-        tasks = [asyncio.create_task(pump(sh)) for sh in shards]
+        def spawn(shard: _Shard) -> None:
+            """Attach one more connection to the live stream (used by resync)."""
+            if shard not in self._shards:
+                self._shards.append(shard)
+            tasks.append(asyncio.create_task(pump(shard)))
+
+        self._spawn_shard = spawn
+        for sh in list(self._shards):
+            tasks.append(asyncio.create_task(pump(sh)))
+        if len(self._shards) > 1:
+            print(f"  {self.platform}: {len(markets)} markets over "
+                  f"{len(self._shards)} connections (cap {cap}/conn)")
+
+        getter: asyncio.Task | None = None
         try:
             while True:
-                yield await queue.get()
+                if getter is None:
+                    getter = asyncio.create_task(queue.get())
+                if not tasks and queue.empty():
+                    return          # every shard finished and nothing is pending
+                await asyncio.wait([getter, *tasks],
+                                   return_when=asyncio.FIRST_COMPLETED)
+                # Queued books are drained BEFORE a finished shard is inspected,
+                # so a shard that yielded and then died does not lose its last
+                # update to its own exception.
+                if getter.done():
+                    mk = getter.result()
+                    getter = None
+                    yield mk
+                    continue
+                for t in [t for t in tasks if t.done()]:
+                    tasks.remove(t)
+                    if (exc := t.exception()) is not None:
+                        raise exc
         finally:
+            if getter is not None:
+                getter.cancel()
             for t in tasks:
                 t.cancel()
+            self._shards, self._spawn_shard = [], None
+
+    def _meta_of(self, markets: list[Market]) -> dict[str, dict]:
+        """slug -> the raw market dict the normalizer needs."""
+        return {
+            m.raw["market"]["slug"]: m.raw["market"]
+            for m in markets
+            if m.raw.get("market", {}).get("slug")
+        }
 
     async def _stream_shard(
-        self, markets: list[Market], *, reconnect: bool = True,
+        self, shard: _Shard, *, reconnect: bool = True,
         idle_timeout: float = STREAM_IDLE_TIMEOUT_SECONDS,
     ) -> AsyncIterator[Market]:
         """One connection's worth of books. Continuously yield a fresh
@@ -587,30 +689,32 @@ class PolymarketUSFeed:
         `reconnect=False`); the consumer's staleness gate covers the blind gap.
         Structured identity (event/futures) is recomputed from the market dict,
         so it survives streaming exactly as at discovery.
-        """
-        meta_by_slug = {
-            m.raw["market"]["slug"]: m.raw["market"]
-            for m in markets
-            if m.raw.get("market", {}).get("slug")
-        }
-        slugs = list(meta_by_slug)
 
+        The subscription set is `shard.meta_by_slug`, which `resync` mutates —
+        so a resubscribe always sends the CURRENT set, and a mutation that the
+        venue refused is corrected by the reconnect that follows it.
+        """
         backoff = RECONNECT_BASE_SECONDS
         while True:
             headers = {
                 **polymarket_us_headers(self._creds, "GET", _WS_PATH),
                 "User-Agent": _UA,
             }
+            shard.ws = None
+            self._fail_pending_acks(shard)
             try:
                 async with websockets.connect(
                     _WS_URL, additional_headers=headers
                 ) as ws:
+                    shard.ws = ws
+                    # Fresh requestIds per connection: they are the only handle
+                    # on a subscription, and reusing one across connections
+                    # would make an `unsubscribe` ambiguous.
+                    shard.batches.clear()
+                    slugs = list(shard.meta_by_slug)
                     for i in range(0, len(slugs), self._SUB_BATCH):
-                        await ws.send(json.dumps({"subscribe": {
-                            "requestId": f"pmarb{i}",
-                            "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
-                            "marketSlugs": slugs[i:i + self._SUB_BATCH],
-                        }}))
+                        await self._send_subscribe(
+                            shard, slugs[i:i + self._SUB_BATCH])
                     while True:
                         try:
                             raw = await asyncio.wait_for(
@@ -630,24 +734,249 @@ class PolymarketUSFeed:
                         backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
                         payload = json.loads(raw)
                         md = payload.get("marketData")
-                        if md is None and "error" in payload:
-                            # The frame that made a 75% subscription loss look
-                            # like an idle market. Never swallow it again.
-                            print(f"  WARNING {self.platform} subscribe error: "
-                                  f"{payload['error']}")
+                        if md is None:
+                            self._on_control(shard, payload)
                             continue
-                        slug = md.get("marketSlug") if md else None
-                        if slug in meta_by_slug:
+                        slug = md.get("marketSlug")
+                        # Checked against the CURRENT set, so a slug dropped by a
+                        # resync stops being yielded the moment it is dropped —
+                        # even if the venue is still sending it, and even if the
+                        # unsubscribe never landed.
+                        if slug in shard.meta_by_slug:
                             yield replace(
                                 normalize_market_data(
-                                    meta_by_slug[slug], md, now_utc()
+                                    shard.meta_by_slug[slug], md, now_utc()
                                 ),
                                 received_mono=received_mono,
                             )
             # ConnectionClosed = clean/keepalive drop; OSError = network/DNS/reset;
             # TimeoutError = a stalled connect/recv. All are recoverable.
             except (TimeoutError, websockets.ConnectionClosed, OSError):
+                shard.ws = None
                 if not reconnect:
                     raise
                 await asyncio.sleep(backoff)  # capped exponential backoff
                 backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)
+
+    # --- control frames ---------------------------------------------------- #
+    def _on_control(self, shard: _Shard, payload: dict) -> None:
+        """Everything that is not a book update.
+
+        Two frames matter. An `error` is the one that made a 75% subscription
+        loss look like an idle market — never swallowed, and counted, because a
+        resync reads that counter to decide whether its subscribes landed. An
+        `unsubscribed` ack is the only positive confirmation this venue gives,
+        so it resolves the waiting mutation.
+        """
+        if "error" in payload:
+            shard.errors += 1
+            print(f"  WARNING {self.platform} subscribe error: "
+                  f"{payload['error']}")
+            return
+        rid = payload.get("requestId")
+        if rid is not None and payload.get("unsubscribed"):
+            fut = self._acks.pop(rid, None)
+            if fut is not None and not fut.done():
+                fut.set_result(payload)
+
+    def _fail_pending_acks(self, shard: _Shard) -> None:
+        """A mutation whose socket died never got an answer, and an unanswered
+        mutation is a failed one — it must not resolve by optimism.
+
+        Scoped to THIS shard by the requestId prefix: shards reconnect
+        independently, and failing another connection's pending unsubscribe would
+        recycle a shard that was perfectly healthy.
+        """
+        prefix = f"pmarb-s{shard.index}-"
+        for rid in [r for r in self._acks if r.startswith(prefix)]:
+            fut = self._acks.pop(rid)
+            if not fut.done():
+                fut.set_exception(SubscriptionMutationError(
+                    "connection closed before the venue acknowledged"))
+
+    async def _send_subscribe(self, shard: _Shard, slugs: list[str]) -> str:
+        """Subscribe one batch and record it under its requestId.
+
+        The requestId is remembered because it is the ONLY way to ever undo this
+        subscription: `unsubscribe` takes a requestId and nothing else (sending
+        subscriptionType/marketSlugs alongside it is rejected with
+        `invalid_message` — the JSON->proto unmarshal refuses unknown fields).
+        """
+        rid = shard.mint_request_id()
+        await shard.ws.send(json.dumps({"subscribe": {
+            "requestId": rid,
+            "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+            "marketSlugs": slugs,
+        }}))
+        shard.batches[rid] = list(slugs)
+        return rid
+
+    async def _send_unsubscribe(self, shard: _Shard, rid: str,
+                                timeout: float) -> None:
+        """Tear down one subscribe batch and WAIT for the venue to confirm it.
+
+        Verified shape (2026-09-21): `{"unsubscribe": {"requestId": rid}}` ->
+        `{"requestId": rid, "unsubscribed": true}`. Silence raises: an
+        unsubscribe that is not confirmed may have freed nothing, and a shard
+        that believes it has headroom it does not have is how the cap bug
+        started.
+        """
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._acks[rid] = fut
+        try:
+            await shard.ws.send(json.dumps({"unsubscribe": {"requestId": rid}}))
+            try:
+                await asyncio.wait_for(fut, timeout=timeout)
+            except TimeoutError:
+                raise SubscriptionMutationError(
+                    f"unsubscribe {rid} unacknowledged after "
+                    f"{timeout:.0f}s") from None
+        finally:
+            self._acks.pop(rid, None)
+
+    # --- live subscription mutation ---------------------------------------- #
+    async def resync(
+        self, markets: list[Market], *,
+        ack_timeout: float = SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
+        error_grace: float = SUBSCRIBE_ERROR_GRACE_SECONDS,
+    ) -> dict:
+        """Make the live subscriptions cover exactly `markets`, no reconnect.
+
+        THE AWKWARD PART is granularity: there is no per-slug removal, so the
+        removable unit is a whole subscribe batch. A batch that is only PARTLY
+        dead is therefore unsubscribed entirely and its survivors immediately
+        resubscribed under a new requestId. That costs those survivors a brief
+        gap in their books — acceptable, because Poly sends full snapshots (the
+        next message is a complete book, not a delta) and the detector's
+        staleness gate discards the interval rather than trusting it. The
+        alternative, leaving the batch alone, means never dropping a settled
+        market that happens to share a batch with a live one, which is the stale
+        -book artifact this refresh exists to remove.
+
+        Slots are freed by the unsubscribe (verified), so adds are placed into
+        whatever shards now have headroom under `_MAX_SUBS_PER_CONN`, and only
+        the overflow starts a new shard.
+
+        Returns a summary with `applied`: "live" when every mutation was
+        confirmed, "recycled" when at least one shard fell back to reconnecting
+        with the corrected list, "on_reconnect" when no shard was connected.
+        """
+        desired = self._meta_of(markets)
+        current = {slug for sh in self._shards for slug in sh.meta_by_slug}
+        added = [s for s in desired if s not in current]
+        dropped = current - desired.keys()
+        out = {"added": len(added), "dropped": len(dropped),
+               "applied": "live", "recycled": 0, "new_shards": 0}
+        if not self._shards:
+            # Nothing is streaming, so there is nothing to mutate; the caller's
+            # market list is what the next stream_books will subscribe.
+            out["applied"] = "on_reconnect"
+            return out
+        if not added and not dropped:
+            out["applied"] = "unchanged"
+            return out
+
+        recycled: list[_Shard] = []
+        for shard in self._shards:
+            if not await self._prune_shard(shard, desired, ack_timeout):
+                recycled.append(shard)
+
+        # Adds go to the shards with room, counting the room freed above.
+        pending = list(added)
+        for shard in self._shards:
+            if not pending or shard in recycled:
+                continue
+            room = self._MAX_SUBS_PER_CONN - len(shard.meta_by_slug)
+            take, pending = pending[:max(room, 0)], pending[max(room, 0):]
+            for slug in take:
+                shard.meta_by_slug[slug] = desired[slug]
+            if not take or shard.ws is None:
+                continue        # down shard: its reconnect subscribes the lot
+            try:
+                for i in range(0, len(take), self._SUB_BATCH):
+                    await self._send_subscribe(
+                        shard, take[i:i + self._SUB_BATCH])
+            except (websockets.ConnectionClosed, OSError) as exc:
+                print(f"  WARNING {self.platform} shard {shard.index} subscribe "
+                      f"failed ({exc}); reconnecting with the corrected list")
+                recycled.append(shard)
+
+        # Overflow starts new connections. The venue counts subscriptions per
+        # connection, so this is the only way to grow past the cap.
+        while pending and self._spawn_shard is not None:
+            chunk, pending = (pending[:self._MAX_SUBS_PER_CONN],
+                              pending[self._MAX_SUBS_PER_CONN:])
+            index = 1 + max((sh.index for sh in self._shards), default=-1)
+            shard = _Shard(index, {s: desired[s] for s in chunk})
+            self._spawn_shard(shard)
+            out["new_shards"] += 1
+        if pending:
+            print(f"  WARNING {self.platform} {len(pending)} new markets could "
+                  f"not be placed — no live stream to attach a shard to")
+
+        # Poly acks an unsubscribe but says NOTHING on a successful subscribe;
+        # only a later error frame reveals a refusal. So the only honest
+        # verification is to watch for one, briefly, and recycle the shard if it
+        # appears. Optimism here is what let 6,000 markets go unsubscribed for
+        # two hours while every counter looked healthy.
+        watched = [sh for sh in self._shards if sh not in recycled]
+        before = {sh.index: sh.errors for sh in watched}
+        await asyncio.sleep(error_grace)
+        for shard in watched:
+            if shard.errors > before[shard.index]:
+                print(f"  WARNING {self.platform} shard {shard.index} reported "
+                      f"an error after resubscribing; reconnecting with the "
+                      f"corrected list")
+                recycled.append(shard)
+
+        for shard in recycled:
+            await self._recycle(shard)
+        out["recycled"] = len(recycled)
+        if recycled:
+            out["applied"] = "recycled"
+        return out
+
+    async def _prune_shard(self, shard: _Shard, desired: dict[str, dict],
+                           ack_timeout: float) -> bool:
+        """Drop everything on this shard that is no longer wanted.
+
+        Returns False if the shard must be recycled instead (an unsubscribe the
+        venue never confirmed, or a dead socket mid-flight). `meta_by_slug` is
+        corrected FIRST either way, so both the reader's filter and any
+        subsequent resubscribe use the new set regardless of what the venue did.
+        """
+        stale = {rid: slugs for rid, slugs in shard.batches.items()
+                 if any(s not in desired for s in slugs)}
+        for rid, slugs in stale.items():
+            survivors = [s for s in slugs if s in desired]
+            for slug in slugs:
+                if slug not in desired:
+                    shard.meta_by_slug.pop(slug, None)
+            shard.batches.pop(rid, None)
+            if shard.ws is None:
+                continue        # the reconnect resubscribes the corrected set
+            try:
+                await self._send_unsubscribe(shard, rid, ack_timeout)
+                if survivors:
+                    await self._send_subscribe(shard, survivors)
+            except (SubscriptionMutationError, websockets.ConnectionClosed,
+                    OSError) as exc:
+                print(f"  WARNING {self.platform} shard {shard.index} "
+                      f"unsubscribe failed ({exc}); reconnecting with the "
+                      f"corrected list")
+                return False
+        return True
+
+    async def _recycle(self, shard: _Shard) -> None:
+        """Fall back to a reconnect for one shard.
+
+        Closing the socket makes its reader's recv raise, which lands in
+        `_stream_shard`'s own reconnect path — the same recovery a network drop
+        takes, and the one already proven by two weeks of uptime. Only this
+        shard's books pause; the other connections and the Kalshi side are
+        untouched.
+        """
+        ws, shard.ws = shard.ws, None
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
