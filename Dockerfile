@@ -33,6 +33,13 @@ COPY matches.json ./matches.json
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 
+# The operational scripts ship for the same reason Alembic does: a match refresh
+# or a DB seed can then run as a one-off task from this exact artifact, against
+# the same pinned dependencies as the collector, instead of needing a second
+# environment that can drift from it. Last layer because scripts change far more
+# often than pyproject does, so nothing above this has to be rebuilt.
+COPY scripts ./scripts
+
 # Drop privileges. The collector writes nothing to disk in the cloud (the JSONL
 # sinks are off), so it has no need of a writable working directory.
 RUN useradd --create-home --uid 10001 pmarb && chown -R pmarb:pmarb /app
