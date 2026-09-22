@@ -5,24 +5,36 @@ Answers "does this arb actually exist at retail scale": of the apparent
 much survives fees too. Reads only fields that exist in the log; the single
 viability gate is `fee_adjusted_spread` (> 0 AND estimated_fillable_size > 0).
 
-Run: .venv/bin/python -m pmarb.backtest.backtest [LOG] [MATCHES] [LATEST]
+Two sources, and they are not interchangeable:
+
+  files  .venv/bin/python -m pmarb.backtest.backtest [LOG] [MATCHES] [LATEST]
+  db     .venv/bin/python -m pmarb.backtest.backtest --db --since ISO --until ISO
+
+The JSONL sinks are the Phase 1 record. The database additionally carries
+`detect_latency_ms` and `partner_age_ms`, which the sinks never received, so any
+latency or window-survival work has to read the database — and has to scope to
+ONE collection run, because runs differ in how much they could see.
+
 Writes backtest_report.json next to the log.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
-import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from statistics import median, quantiles
 
+from pmarb.backtest.survival import latency_summary, survival_curve
 from pmarb.config import (
     LATEST_LOG_PATH,
     LOG_PATH,
     MATCH_LOG_PATH,
     SLIPPAGE_BUFFER,
 )
+from pmarb.db import connect
+from pmarb.db.sources import load_from_db
 from pmarb.models import Sample
 
 REPORT_PATH = "backtest_report.json"
@@ -372,6 +384,17 @@ def run_backtest(rows: list[Sample], matches: list[dict],
                              reverse=True),
         },
         "persistence": _persistence(windows),
+        # How long WE took to see the edge, and how stale the other leg already
+        # was. Only the database carries these; from the JSONL sinks they are
+        # all None and the survival curve is the only latency answer available.
+        "latency": latency_summary(rows),
+        # The question persistence cannot answer: not "how long did it last"
+        # but "was it still there when we could have acted".
+        "survival": [
+            {"delta_ms": p.delta_ms, "opened": p.opened, "survived": p.survived,
+             "censored": p.censored, "pct_survived": p.pct}
+            for p in survival_curve(rows)
+        ],
     }
     return report
 
@@ -441,16 +464,68 @@ def _print_summary(rep: dict) -> None:
               f"{w['duration_seconds']:>6.0f}s {rate} [{label}] "
               f"{w['question'][:40]}")
 
+    lat = rep.get("latency") or {}
+    if lat.get("rows_with_latency"):
+        d, pa = lat["detect_ms"], lat["partner_age_ms"]
+        print(f"\nlatency (n={lat['rows_with_latency']}): "
+              f"detection p50={d['p50']}ms p99={d['p99']}ms | "
+              f"partner book age p50={pa['p50']}ms p95={pa['p95']}ms")
+    surv = rep.get("survival") or []
+    if any(p["opened"] for p in surv):
+        print("\nsurvival — was the window still viable this long after it opened:")
+        print(f"  {'after':>8}  {'windows':>8}  {'still open':>11}  {'censored':>9}")
+        for p in surv:
+            pct = f"{p['pct_survived']}%" if p["pct_survived"] is not None else "-"
+            after = "at open" if p["delta_ms"] == 0 else f"{p['delta_ms'] / 1000:g}s"
+            print(f"  {after:>8}  {p['opened']:>8}  "
+                  f"{p['survived']:>6} {pct:>4}  {p['censored']:>9}")
+
     print(f"\nHEADLINE: {hl['statement']}")
 
 
+def _parse_when(text: str | None) -> datetime | None:
+    """An ISO instant on the command line, assumed UTC when it carries no zone."""
+    if not text:
+        return None
+    when = datetime.fromisoformat(text)
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
 def main() -> None:
-    log_path = sys.argv[1] if len(sys.argv) > 1 else LOG_PATH
-    match_path = sys.argv[2] if len(sys.argv) > 2 else MATCH_LOG_PATH
-    latest_path = sys.argv[3] if len(sys.argv) > 3 else LATEST_LOG_PATH
-    rows, matches, tracked = load_from_files(log_path, match_path, latest_path)
-    report = run_backtest(rows, matches, tracked,
-                          source=f"{log_path} + {match_path}")
+    parser = argparse.ArgumentParser(
+        description="Replay collected observations and report the honest funnel.")
+    parser.add_argument("--db", action="store_true",
+                        help="read observations from Postgres instead of the "
+                             "JSONL sinks (required for latency fields, which "
+                             "only the database carries)")
+    parser.add_argument("--since", help="ISO instant; database only")
+    parser.add_argument("--until", help="ISO instant; database only")
+    parser.add_argument("log", nargs="?", default=LOG_PATH)
+    parser.add_argument("matches", nargs="?", default=MATCH_LOG_PATH)
+    parser.add_argument("latest", nargs="?", default=LATEST_LOG_PATH)
+    args = parser.parse_args()
+
+    if args.db:
+        since, until = _parse_when(args.since), _parse_when(args.until)
+        if since is None and until is None:
+            # The observation table accumulates across runs, and runs differ in
+            # what they could even see: one streamed 10,048 books against a
+            # 2,000-market Polymarket subscription cap, the next 14,780 with the
+            # cap fixed, and one carries a 1.6h hole where Postgres was down.
+            # Pooling them divides by a denominator that never existed.
+            print("  WARNING no --since/--until: this pools every collection "
+                  "run in the database, and runs differ in coverage. Rates "
+                  "computed across them are not comparable.\n")
+        with connect() as conn:
+            rows, matches, tracked = load_from_db(conn, since=since, until=until)
+        window = f"{args.since or 'start'}..{args.until or 'now'}"
+        source = f"postgres [{window}]"
+    else:
+        rows, matches, tracked = load_from_files(
+            args.log, args.matches, args.latest)
+        source = f"{args.log} + {args.matches}"
+
+    report = run_backtest(rows, matches, tracked, source=source)
     _print_summary(report)
     with open(REPORT_PATH, "w") as fh:
         json.dump(report, fh, indent=2)

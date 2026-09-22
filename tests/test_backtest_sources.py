@@ -111,7 +111,15 @@ class TestBothSourcesAgree:
         log = run_backtest([_sample_from_log(self.LOG_LINE)], [_match()],
                            {PAIR}, source="file")
         db.pop("source"), log.pop("source")
+        # Latency is the second honest difference between the sources (after
+        # sample_reason): the JSONL sinks never carried detect_latency_ms, so
+        # the file path cannot report it. Everything the funnel computes must
+        # still agree exactly.
+        db_lat, log_lat = db.pop("latency"), log.pop("latency")
         assert db == log
+        assert db_lat["rows_with_latency"] == 1
+        assert log_lat["rows_with_latency"] == 0
+        assert log_lat["detect_ms"]["p50"] is None
 
 
 class TestRunBacktestIsPure:
