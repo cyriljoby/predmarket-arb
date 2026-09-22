@@ -531,13 +531,20 @@ class KalshiFeed:
                         backoff = RECONNECT_BASE_SECONDS  # healthy stream -> reset
                         msg = json.loads(raw)
                         typ = msg.get("type")
-                        if typ not in ("orderbook_snapshot", "orderbook_delta"):
-                            continue  # 'subscribed' ack, errors, etc.
+                        # Tracked BEFORE the book-frame filter: control acks
+                        # consume numbers in the same counter (verified live
+                        # 2026-09-21 — `update_subscription` acks took seq 53
+                        # and 54 between book frames 52 and 55), so advancing
+                        # only on book frames reads those acks as a gap and
+                        # resnapshots the whole subscription. Frames with no
+                        # `seq` at all (the `subscribed` ack) don't count.
                         seq = msg.get("seq")
                         if seq is not None:
                             if last_seq is not None and seq != last_seq + 1:
                                 break  # gap -> reconnect & resnapshot
                             last_seq = seq
+                        if typ not in ("orderbook_snapshot", "orderbook_delta"):
+                            continue  # 'subscribed' ack, errors, etc.
                         body = msg.get("msg") or {}
                         ticker = body.get("market_ticker")
                         if ticker not in meta:
