@@ -4,6 +4,16 @@ services:
   db:
     image: postgres:17-alpine
     container_name: pmarb-db
+    # The database has disappeared mid-run twice (2026-08-24, and overnight on
+    # 2026-09-06, costing 43,586 observations). The collector survives it —
+    # writes degrade to the JSONL sinks and the writer opens a fresh connection
+    # per batch, so it heals by itself once Postgres is back — but nothing
+    # brought Postgres back, so it stayed down until someone looked.
+    #
+    # `unless-stopped` rather than `always`: a container stopped deliberately
+    # stays stopped across a Docker restart, which is what you want when you
+    # took it down on purpose.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: pmarb
       POSTGRES_PASSWORD: pmarb
@@ -17,5 +27,42 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+  collector:
+    build: .
+    container_name: pmarb-collector
+    # Same reasoning as `db`: the one thing that must not happen is a process
+    # that dies and stays dead while nobody is watching. `unless-stopped`
+    # rather than `always` so a container stopped deliberately stays stopped
+    # across a Docker restart.
+    restart: unless-stopped
+    depends_on:
+      db:
+        # The collector opens a connection at startup, so without this it races
+        # Postgres' first-boot initdb on a fresh VPS and starts up with the
+        # database already unreachable.
+        condition: service_healthy
+    # Venue credentials only (both API key pairs) — everything else is set
+    # below, so .env stays the same file a laptop run already uses. One caveat:
+    # the VPS copy must set KALSHI_PRIVATE_KEY (the PEM inline) rather than
+    # KALSHI_PRIVATE_KEY_PATH, because a laptop's path to the key file points
+    # nowhere inside this image.
+    env_file: .env
+    environment:
+      # Container-to-container, so the INTERNAL 5432 — the 5433 host mapping
+      # exists only to dodge a local Postgres and does not apply inside the
+      # compose network. Format matches db/engine.py's DEFAULT_DSN with the
+      # hostname swapped for the service name.
+      PMARB_DSN: postgresql://pmarb:pmarb@db:5432/pmarb
+    volumes:
+      # The image bakes matches.json in (see the Dockerfile comment for why
+      # that is the right standalone default). Shadowing it with a bind mount
+      # makes a match refresh an scp plus a restart instead of an image
+      # rebuild — which matters because the matcher and the collector change on
+      # completely different clocks. Read-only: the collector only ever reads
+      # the match set, and a mount that cannot be written cannot be corrupted
+      # by the thing consuming it.
+      - ./matches.json:/app/matches.json:ro
+    # Deliberately no `ports`: the collector listens on nothing. Its only
+    # outputs are Postgres rows and the status line on stdout.
 volumes:
   pmarb-pgdata:
