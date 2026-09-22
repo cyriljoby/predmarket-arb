@@ -45,6 +45,38 @@ def _require(name: str) -> str:
     return value
 
 
+def _kalshi_private_key_pem() -> str:
+    """The Kalshi RSA private key, inline from the environment or read from disk.
+
+    Two sources because the two places this runs disagree about what a secret
+    is. On a laptop the key is a file you downloaded once and never moved, so a
+    path is the natural handle. In a container there is no such file and no
+    volume worth mounting for one value — the secret arrives as an environment
+    variable, which is the only thing an env-only secret store can feed.
+
+    KALSHI_PRIVATE_KEY wins when both are set: if someone went to the trouble
+    of injecting the key itself, a stale path inherited from a copied .env must
+    not silently shadow it.
+    """
+    inline = os.environ.get("KALSHI_PRIVATE_KEY")
+    if inline:
+        # A PEM shoved through an env var usually arrives with its newlines
+        # escaped — `docker run -e`, compose interpolation and most secret
+        # stores all hand you the two characters backslash-n rather than a real
+        # line break. cryptography rejects that as a malformed key with an
+        # error that says nothing about newlines, so normalize here rather than
+        # debug it at the signing call.
+        return inline.replace("\\n", "\n")
+    path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
+    if path:
+        return Path(path).expanduser().read_text()
+    raise RuntimeError(
+        "missing Kalshi private key: set KALSHI_PRIVATE_KEY to the PEM itself "
+        "(containers, secret stores) or KALSHI_PRIVATE_KEY_PATH to the file "
+        "holding it (local runs); copy .env.example to .env and fill it in"
+    )
+
+
 @dataclass(frozen=True)
 class KalshiCredentials:
     """Kalshi API key pair. The private key signs every request (RSA-PSS)."""
@@ -54,10 +86,9 @@ class KalshiCredentials:
 
     @classmethod
     def from_env(cls) -> KalshiCredentials:
-        key_path = Path(_require("KALSHI_PRIVATE_KEY_PATH")).expanduser()
         return cls(
             key_id=_require("KALSHI_API_KEY_ID"),
-            private_key_pem=key_path.read_text(),
+            private_key_pem=_kalshi_private_key_pem(),
         )
 
 
