@@ -1,386 +1,273 @@
 # predmarket-arb
 
-Cross-venue arbitrage detection for regulated prediction markets. It streams
-live order books from **Kalshi** and **Polymarket US**, matches markets across
-the two venues, walks both books in tandem to find the largest hedge that still
-clears fees, and logs every window to disk for replay.
+## Purpose
 
-**Phase 1: no orders are placed, no capital is at risk.** The deliverable is a
-measurement, not a trading system.
+Cross-venue arbitrage **detection and measurement** for regulated prediction
+markets. It streams live order books from **Kalshi** and **Polymarket US**,
+matches markets across the two venues, walks both books in tandem to find the
+largest hedge that still clears fees, and records every window for replay.
 
----
+No orders are placed and no capital is at risk. The deliverable is a
+measurement, not a trading system: the question it answers is whether this arb
+actually exists at retail scale, once matching error, slippage and fees have all
+been charged against it. Results live in `backtest_report.json` and are quoted
+with the run that produced them rather than here, because runs differ in match
+set, sampling policy and coverage, and their numbers are not interchangeable.
 
-## Pipeline
+## Architecture
 
 ```
-┌─ DISCOVERY ─ offline, re-run when the market catalog moves ──────────────────┐
-
-  Kalshi REST ──┐
-                ├──►  scripts/export_candidates.py
-  Poly US REST ─┘        │
-                         ├─ StructuredMatcher   games:     league + start + YES side
-                         ├─ FuturesMatcher      outrights: competition × entity
-                         ├─ LineMatcher         spreads/totals: game × line
-                         ├─ PropMatcher         props:     game × player × stat × rung
-                         └─ RuleBasedMatcher    lexical, unstructured markets only
-                                │
-                                ▼  dedupe_one_to_one — per layer, claims carried forward
-                                │
-                          matches.json  ◄──  scripts/dedupe_matches.py
-                          pairs + review lineage    (same 1:1 pass, applied offline
-                                                     to an existing match set)
-
-┌─ COLLECTION ─ long-running ──────────────────────────────────────────────────┐
-
-  Kalshi WS ────┐
-                ├──► pmarb/main.py ── in-memory book cache, ~2,000 books
-  Poly US WS ───┘         │
-                          ▼  on every book update
-                    evaluate_pair()   staleness gate, then tandem depth walk
-                          │
-              ┌───────────┴────────────┐
-              ▼                        ▼
-    opportunities_latest.jsonl   opportunities.jsonl
-    one line per pair, always    the time series, throttled
-    (the honest denominator)     (viable always; games on edge-change)
-
-┌─ ANALYSIS ───────────────────────────────────────────────────────────────────┐
-
-    both logs + matches.json ──► pmarb/backtest/backtest.py ──► backtest_report.json
+pmarb/
+  feeds/        kalshi.py, polymarket.py — REST discovery + one WebSocket per venue
+  models/       Market (shared schema), SportsEvent / FuturesEvent / LineEvent /
+                PropEvent identities, Sample
+  matching/     structured, futures, lines, props, matcher (lexical), hazards
+  detection/    spread.py — compute_fill_price, max_fillable_size, evaluate_pair
+  oplog/        JSONL sinks
+  db/           Postgres schema, sync, batched writer
+  backtest/     backtest.py (funnel report), survival.py (window survival curve)
+  refresh.py    MatchSetRefresher — daily in-process match-set refresh
+  main.py       collector: book cache, write-grain policy, detection on each update
+scripts/        export_candidates.py, seed_db.py, dedupe_matches.py, verify_auth.py
 ```
 
-There is exactly one path by which order books enter the system — the WebSocket
-feeds. REST is used only to discover which markets exist.
-
----
-
-## Stages
-
-### Discovery — four structured matchers, then text
-
-A matching error is the most dangerous failure in the system: you believe you
-are hedged when you hold two independent bets that can both lose. So markets are
-paired on **structured identity** wherever both venues encode one, and on text
-only where neither does.
-
-| matcher | handles | identity key | pairs |
-|---|---|---|---|
-| `matching/structured.py` | head-to-head games | league, start time, competitor pair, which competitor YES pays on | ~430 |
-| `matching/futures.py` | entity outrights | `(competition, entity)`, sub-event selectors ("Stage 9") exact | ~1,050 |
-| `matching/lines.py` | spreads and totals | league, kind, **exact line**, game, orientation | ~1,160 |
-| `matching/props.py` | player props | game, player, stat, **exact threshold** | ~1,210 |
-| `matching/matcher.py` | everything unstructured | Jaccard + character ratio over question text | 0 today |
-
-Counts are one live snapshot and move constantly — game-day markets are listed
-days ahead and halted at kickoff, so a fetch six hours later is legitimately
-different. The stable figures are the verified ones below.
-
-#### Where each fact comes from
-
-The two venues put their structure in different places, and this table is the
-whole translation. **Polymarket states its taxonomy in an enum** (`marketType`,
-6 values; `sportsMarketType`, ~144 values shaped `sport_entity_period_stat`).
-**Kalshi has no such field** — 4,070 opaque series prefixes (`KXMLBKS`), with
-the readable concept in the event *title* instead.
-
-| fact | Kalshi | Polymarket US |
-|---|---|---|
-| market family | series ticker prefix (hand-mapped) | `sportsMarketType` |
-| game (teams) | enclosing event title, "A vs B: Stat" | `marketSides[].team`, else description prose |
-| game start | event-ticker segment, **US Eastern** | `gameStartTime` (UTC) |
-| competitor (moneyline) | `yes_sub_title` | `team.name` + `team.safeName` |
-| outright entity | `yes_sub_title` | `title` |
-| line (spread/total) | `floor_strike`, `strike_type: greater` | `line` |
-| prop player | `yes_sub_title` before ":" | `title` |
-| prop threshold | `"N+"` in `yes_sub_title` (= `floor_strike` + 0.5) | `line` (gte) |
-
-Two conventions bite here. Kalshi writes a prop rung twice — `"3+"` and
-`floor_strike: 2.5` — and the extractor reads **both and refuses the market if
-they disagree**, since one number written two ways is a free integrity check.
-And Poly's `team.name` is the MASCOT in college football ("Bulldogs") while
-`safeName` is the school ("The Citadel"); Kalshi names the school, so the two
-are joined only when neither contains the other. Before that fix, 176 CFB games
-matched nothing at all.
-
-#### Orientation — why spreads need a flag
-
-Kalshi always writes the laying side ("Vanderbilt wins by over 41.5"). Poly
-writes ONE market per (game, line) and may quote either side: measured live,
-4,046 groups were favorite-side and 4,477 underdog-side, **never both**. So on
-roughly half the inventory Poly's YES is the *complement* of Kalshi's YES.
-
-The detector hedges YES against NO. Handed a complementary pair unswapped, it
-would buy the same event on both venues and price a guaranteed profit that does
-not exist. So each candidate carries `poly_inverted`, and the collector swaps
-that leg's ladders (`main.oriented`). The valid combinations are exactly:
-
-| Poly YES | Kalshi market | result |
-|---|---|---|
-| team at −L | that team's | direct |
-| team at +L | the **opponent's** | inverted |
-| team at +L | that team's | **refused** — shares a team and a number, different bet |
-
-Props need no such flag: both venues write "at least N" as YES, and each feed
-refuses anything else rather than assuming.
-
-#### What each layer refuses
-
-Refusals are load-bearing — an unmatched pair costs coverage, a wrongly matched
-one costs money.
-
-- **Sub-periods.** First-half totals, quarter spreads, team totals and
-  first-five-innings markets are separate contracts. Poly is filtered by an
-  allowlist of six `full_game` types (`football_team_points_full_game_total`
-  contains "full_game" but is a *team* total, so it is excluded); Kalshi by an
-  allowlist of full-game series.
-- **Adjacent rungs.** A total at 45.5 and one at 46.5, or a prop at 2+ and 3+,
-  are different contracts. The line/threshold is part of the key, never a
-  tolerance.
-- **Ambiguous games.** Same teams, same line, twice inside the window (a series
-  or doubleheader) resolves by closest start; a genuine tie is refused.
-- **Unknown orientation or unreadable sides** are dropped rather than guessed.
-- **Text matching on structured markets.** The lexical matcher is barred from
-  any market carrying a structured identity: those belong to multi-outcome sets,
-  where fuzzy text reliably pairs the wrong outcome. It currently claims nothing
-  — every market it would reach is now typed.
-
-Each layer is then reduced to a strict 1:1 assignment by `dedupe_one_to_one`,
-with claims carried forward so a looser layer can never re-claim a market a more
-precise one already took.
-
-Every pair lands in `matches.json` carrying `match_method`, `poly_inverted`,
-`settlement_hazards`, and its review lineage (`resolution_match`, cohort,
-reviewer) — so what the collector streams, and why, is auditable from one file.
-
-#### Verified coverage
-
-Measured against a frozen catalog, checking each pair independently of the
-matcher's own logic (identity triple equal, competitors aligned, orientation
-correct):
-
-| layer | verified pairs | violations |
-|---|---|---|
-| lines (spreads + totals) | **1,520** | 0 |
-| props | **1,343** | 0 |
-
-Props were hidden for months by a classification bug: Kalshi phrases them
-"Cal Raleigh: 2+", which reads as an entity, so all 6,331 were typed as
-outrights and offered to the futures matcher — where they matched nothing,
-because Poly's props are not outright-shaped. The block looked empty from both
-directions.
-
-#### Settlement hazards
-
-A match means "same event, same side" — **not** "same settlement rules." Of 47
-pairs that review labeled NOT a resolution match, 20 were matched perfectly and
-still were not hedges: NPB games end in ties, NFL preseason has no overtime,
-ITF's lowest tiers are full of walkovers, F1 re-points a fastest-lap market at a
-substitute driver.
-
-`matching/hazards.py` records those as a lookup keyed on the Kalshi **series**,
-not the league — the tier distinction carries the whole signal:
-
-| keyed on | false flags across 243 reviewed-true pairs |
-|---|---|
-| series | **0** |
-| "tennis" | 8 (ATP/WTA reviewed true, ITF M15/W15 reviewed false) |
-| "f1" | 10 (race winner true, fastest lap false) |
-
-The table was derived *from* those negatives, so 0 is a lower bound on its
-error, not a measurement of it. It flags ~4% of pairs today. **Lines and props
-have no hazard rows at all** — nobody has read the two venues' spread, total and
-prop rules side by side. Poly's touchdown props say "excluding passing
-touchdowns"; whether Kalshi's `KXNFLTD` agrees is unchecked.
-
-### Collection — detection on every book update
-
-`pmarb/main.py` holds one WebSocket per venue, keeps every subscribed book in
-memory, and on each update re-evaluates that market's matched partner.
-
-`evaluate_pair()` applies, in order:
-
-1. **Staleness gate** — if either leg's snapshot is older than
-   `MAX_LEG_STALENESS_SECONDS`, discard. A fresh book compared against a stale
-   one is a phantom, not an arb.
-2. **Tandem depth walk** (`max_fillable_size`) — walks both ask ladders in
-   lockstep to find the largest hedge that still clears the viability gate.
-   Slippage is applied first, as depth-walked fill prices; fees are computed on
-   those fill prices, with the Kalshi fee accumulated per level rather than
-   taken on the average (its `0.07·p·(1−p)` is concave, so averaging overstates).
-
-Two sinks, because they answer different questions:
-
-- **`opportunities_latest.jsonl`** — every tracked pair, always, one line each.
-  This is what makes "of all pairs monitored, how many ever went viable" an
-  honest fraction.
-- **`opportunities.jsonl`** — the append-only time series, throttled to bound
-  size. Every viable sample is written; non-viable samples only for live games,
-  and only when the edge changed.
-
-### Analysis — replay
-
-`pmarb/backtest/backtest.py` reads both logs plus the current `matches.json`,
-drops samples belonging to pairs the matcher has since retracted (from every
-numerator *and* denominator), and reports the A → B → C funnel with its caveats
-attached as data rather than as prose someone has to remember.
-
----
-
-## Key findings: wire realities and bugs surfaced
-
-Most of the work in this project has not been algorithmic. It has been finding
-out what the two venues actually send, and catching the failures that look like
-nothing. The pattern worth naming: **the dangerous bugs here are all silent** —
-a dropped subscription, a mis-classified market, an inverted hedge and an idle
-market all produce the same thing in a log, which is nothing.
-
-Recorded so the next person does not rediscover them by accident.
-
-### Silent losses
-
-- **Polymarket caps subscriptions at 2,000 per connection.** The 2,001st is
-  refused with `{"error": "max subscriptions per connection reached"}`; the
-  socket stays healthy and the extra batches are simply never fed. Because the
-  read loop only looked at `marketData` frames, a run subscribing to 8,082
-  markets streamed 2,000 of them and reported nothing wrong for 2.5 hours.
-  Fixed by sharding across connections (1,900 each) and by logging error
-  frames. **Note the 30-day run streamed "~2,040 simultaneous books"** — close
-  enough to the cap that its coverage may have been truncated too, which would
-  make its denominators floors rather than measurements.
-
-- **Kalshi player props were classified as outrights.** Their subject reads
-  "Cal Raleigh: 2+", which the entity extractor accepted, so all 6,331 were
-  offered to the futures matcher — where they matched nothing, because Poly's
-  props are not outright-shaped. The largest matchable block on either venue
-  looked empty from both directions for months.
-
-- **Polymarket names college-football teams by MASCOT** (`team.name` =
-  "Bulldogs") while the school is in `safeName` ("The Citadel"). Kalshi names
-  the school. Zero shared tokens, so 176 CFB games matched nothing — silently,
-  because an unmatched pair writes no row anywhere. Fixing it added 148 pairs.
-
-- **A season written as a range left a stray number.** "2026-27" stripped to
-  "27", which the futures matcher reads as a sub-event selector ("Stage 9"),
-  hard-zeroing the score against any competition without the same stray digits.
-  It rejected correct pairs across every season-range sport.
-
-### Things that would have priced a phantom hedge
-
-- **Half of Polymarket's spread inventory is the opposite side.** Kalshi always
-  writes the laying side ("Vanderbilt wins by over 41.5"); Poly writes one
-  market per (game, line) and quotes either side — 4,046 groups favorite-side,
-  4,477 underdog-side, never both. So on ~half the inventory Poly's YES is the
-  COMPLEMENT of Kalshi's YES, and pairing them naively buys the same event on
-  both venues while reporting a hedge. Carried as `poly_inverted`.
-
-- **Sub-period contracts look identical to full-game ones.** First-half totals,
-  quarter spreads, team totals, first-five-innings markets. Poly's
-  `football_team_points_full_game_total` even contains "full_game" and is a
-  per-TEAM total. Both sides are now allowlisted rather than pattern-matched.
-
-- **"Kansas" is a subset of "Kansas St." and they are different schools.** The
-  name-subset rule that correctly pairs "Houston" with "Houston Astros" made
-  Kansas State the highest-edge "arb" in one match set. Discriminator tokens
-  (`state`, `tech`, `saint`, directional prefixes) now refuse the subset.
-
-- **20 of 47 review-rejected pairs were matched perfectly.** Same game, same
-  side, start times to the minute — and still not hedges, because NPB games
-  tie, NFL preseason has no overtime, ITF walkovers settle differently, and F1
-  re-points a fastest-lap market at a substitute driver. Matching quality
-  cannot fix these; see `matching/hazards.py`.
-
-### Encoding traps
-
-- **Kalshi writes a prop threshold twice** — `"15+"` in `yes_sub_title` and
-  `floor_strike: 14.5` (half-point, `strike_type: greater`). Poly writes
-  `line: 15`, gte. One number, three encodings. The extractor reads both Kalshi
-  forms and refuses the market if they disagree, which turns a wire-format
-  change into a loud failure instead of a wrong contract.
-
-- **Venue ID abbreviations do not correspond.** Kalshi's `26SEP12DELVAN`
-  against Poly's `boscol-cin`: an early overlap estimate that compared them was
-  measuring abbreviation schemes, not games. Matching goes through parsed
-  fields, never through ids.
-
-- **Kalshi encodes game times in US Eastern** inside the event ticker; Poly's
-  `gameStartTime` is UTC. Weekly sports omit the time entirely and parse to
-  midnight Eastern, which is why the start-time window is 30h rather than tight.
-
-- **Settlement dates are padded differently** (Kalshi ~+3d, Poly ~+14d after a
-  game), so resolution-date proximity must NOT gate game matches. Venues also
-  AMEND them — a postponed game is rewritten — which is why observations
-  snapshot their own copy instead of joining `market` later.
-
-- **Kalshi's `rules_primary` is sometimes an unfilled template**
-  (`"above || Count || by || Date ||"`), so venue rules text cannot be relied
-  on for settlement comparison.
-
-### Operational
-
-
-- **Polymarket halts and re-lists markets intraday.** The catalog swung
-  63,530 → 48,718 markets within hours, and NFL player props went
-  `MARKET_STATUS_HALTED` five days before kickoff. Match counts move between
-  runs for this reason, not because the matchers are unstable — quote the
-  frozen-catalog verifications instead.
-
-- **A loud failure is worth keeping loud.** Seeding rejected the first `line`
-  pair outright because `match_pair`'s CHECK constraint predated the new
-  matchers. That is the constraint working: had it been widened to any text,
-  6,100 pairs would have been dropped silently.
-
----
-
-## Results so far
-
-A 30-day continuous run (2026-07-18 → 2026-08-17): 96.9M book updates, ~2,040
-simultaneous books, 706 matched pairs monitored.
-
-| | |
-|---|---|
-| pairs that ever showed a fee-adjusted-positive window | **38.2%** |
-| resolution-match rate, unbiased 60-pair sample | **81.7%** true / 18.3% diverged |
-| windows lasting a single sample | **86%** |
-| median persisting (≥30s) window | 364 shares × 1.03¢ = **$3.76 gross** |
-| break-even spread | 3.19¢/share, against a 3.10¢ average viable spread |
-
-**The arb is real and measurable. It is not capturable at retail latency**, and
-at these sizes it would not pay for the infrastructure to chase it.
-
-Two caveats that matter more than the headline. First, `LOG_HEARTBEAT_SECONDS`
-throttles the append log to 30 seconds, so a window shorter than that yields one
-row and reads as 0s — the "86% single-sample" figure is bounded by the
-instrument, not just the market. Second, 99% of windows above 10¢ sit on pairs
-that resolution review labeled diverged: **the implausible tail of apparent arb
-is matcher error**, and hand review rather than a price filter is what removes it.
-
----
+```
+REST catalogs ──► matchers ──► matches.json ──┐   (re-read daily by refresh.py)
+                                              ▼
+Kalshi WS   ──┐                          evaluate_pair ──┬─► opportunities_latest.jsonl
+              ├──► normalize to Market ──► (staleness,   │   opportunities.jsonl
+Poly US WS  ──┘      + book cache          depth walk)   └─► Postgres observations
+                                                                    │
+                                                        backtest ◄──┘
+```
+
+Matching is offline and produces `matches.json`; the collector consumes it, keeps
+every subscribed book in memory, and on each update re-evaluates the matched
+partner of the market that ticked. Detection is pure functions over two `Market`
+objects, so the economics are testable without a network. Everything observed is
+written twice, to files and to Postgres, and the backtest replays either.
+
+## Ingestion and normalization
+
+One authenticated WebSocket feed per venue carries all order-book data. REST is
+used only to discover which markets exist — at startup and on each daily refresh.
+
+**Kalshi** sends one `orderbook_snapshot` per ticker and then incremental
+`orderbook_delta`s, so book state is **maintained in process**: a snapshot
+replaces a ticker's ladders and a delta adjusts one level. A single monotonic
+`seq` per subscription is the integrity check — a gap means a message was
+dropped, which forces a reconnect and a full resnapshot rather than trusting a
+book that silently diverged. Control acks (including live subscription
+mutations) consume numbers in that same counter, so the reader advances `seq` on
+them too; not doing so turned every mutation into a spurious resnapshot of the
+whole subscription.
+
+**Polymarket US** sends a **full snapshot in every frame**, so there is no delta
+state to keep and a dropped update is simply superseded by the next one. That is
+why the queue merging its shards is deliberately bounded and lossy: an unbounded
+queue would trade a silent subscription loss for a silent memory leak, and the
+staleness gate already covers the gap.
+
+Poly subscriptions are **sharded across connections** because the venue caps
+subscriptions per connection (2,000; the collector shards below it). The excess is
+refused in an error frame while the socket stays healthy — **a refused
+subscription is otherwise completely silent**, indistinguishable from an idle
+market, so the reader logs error frames. Each shard reconnects independently, so
+a drop costs that shard's books rather than the whole stream.
+
+Normalization is pure, and reduces both venues to the same `Market`: `yes_depth`
+and `no_depth` as **ask-side ladders**, with `no_depth` derived from the YES bids
+at `(1 - price)` — the complementary side of a binary market. (Kalshi publishes
+only bid ladders, so its YES asks are derived the same way.) Top-of-book fields
+are kept for reference and logging only; every price detection uses comes from a
+ladder walk. The original payload is preserved in `raw`, and each Market carries
+its own observation timestamp, which is what the staleness gate reads: if either
+leg is too old the evaluation is **skipped**, not computed, because a fresh book
+compared against a stale one prices a phantom.
+
+The tracked match set is refreshed **in process, daily** (`pmarb/refresh.py`,
+`MatchSetRefresher`). Most pairs are tied to a single game, so a set discovered
+once at startup decays into settled markets that still quote. A cycle re-fetches
+both catalogs, re-reads `matches.json`, diffs the pair set, syncs the database
+before anything new goes live, writes a close marker for every dropped pair whose
+window was still viable, prunes and extends the in-memory state in one pass, and
+then mutates the live subscriptions at both venues — no restart. A restart would
+also discard the per-pair viability state that closes open windows, which is why
+this is in process rather than a cron. It re-reads `matches.json` rather than
+re-running the matchers, so `scripts/export_candidates.py` still has to run
+first.
+
+## Matching
+
+A matching error is the most dangerous failure in the system: you believe you are
+hedged while holding two independent bets that can both lose. So pairs are formed
+on **structured identity** wherever both venues encode one, and on text only
+where neither does. Five matchers run in the order below, and each is reduced to
+a strict 1:1 assignment by `dedupe_one_to_one` with claims carried forward, so a
+looser layer can never re-claim a market a more precise one already took.
+
+**structured** (`matching/structured.py`) — head-to-head games and esports
+moneylines. Keys on `SportsEvent`: league, start time, the competitor pair, and
+which competitor YES pays on. Lexical similarity cannot touch these: Kalshi
+phrases a moneyline per team while Poly's question is just "A vs. B" with no YES
+semantics, so the YES side lives only in metadata (`yes_sub_title` on Kalshi, the
+`long` side of the Poly book). Competitors align by normalized-name subset
+("Houston" ⊆ "Houston Astros") with venue team codes as a confirming boost, while
+discriminator tokens (`state`, `tech`, directional prefixes) block the subset
+where it would be wrong ("Kansas" ⊄ "Kansas St."). An ambiguous alignment is
+refused, not guessed: pairing YES(Houston) with YES(Washington) inverts the
+hedge. Resolution-date proximity is deliberately not a gate — the venues pad
+settlement differently, so game start time is the identity.
+
+**futures** (`matching/futures.py`) — entity outrights. Keys on
+`(competition, entity)` plus edition. A golf field is ~150 near-identical "will X
+win Y" questions, so text similarity produces a many-to-many mess and
+multi-outcome phantoms; grounding each market in its entity fixes the
+cardinality. Sub-event selectors ("Stage 9") must match exactly, and the
+competition floor is raised above a bare majority because a single shared token
+("James", "NASCAR") otherwise pairs different contracts.
+
+**lines** (`matching/lines.py`) — spreads and totals. Keys on league, kind,
+**exact line**, game and orientation. Both venues publish the line as a number,
+so identity is arithmetic rather than textual; the line is an equality, never a
+tolerance, since 45.5 and 46.5 on the same game are different contracts. The hard
+part is orientation: Kalshi always writes the laying side, while Poly writes one
+market per (game, line) and may quote either the favorite or the underdog —
+measured live, roughly half the inventory each way and never both. So on about
+half of it Poly's YES is the *complement* of Kalshi's, which a naive pairing would
+buy twice while reporting a hedge. Each candidate carries `poly_inverted` and the
+collector swaps that leg's ladders; unestablished orientation is refused.
+
+**props** (`matching/props.py`) — player props. Keys on (game, player, stat,
+**exact threshold**). Text matching fails because the threshold *is* the
+contract: "2+ total bases" reads almost identically to "3+" on the same player in
+the same game. Kalshi writes the rung twice (`"3+"` in the subtitle and a
+half-point `floor_strike`) and the extractor refuses the market if the two
+disagree, turning a wire-format change into a loud failure rather than a wrong
+contract. Orientation is never in doubt — both venues write "at least N" as YES,
+and each feed refuses anything else.
+
+**lexical** (`matching/matcher.py`) — Jaccard plus character-ratio similarity
+over question text, with token blocking to avoid the full cross product. This is
+the fallback for genuinely unstructured markets, and it is barred from any market
+carrying a structured identity, because those belong to multi-outcome sets where
+fuzzy text reliably pairs the wrong outcome. Its pairs are not streamed.
+
+Whole classes are refused rather than approximated: sub-period contracts
+(first-half totals, quarter spreads, team totals, first-five-innings) are
+allowlisted out on both venues, and doubleheader or series legs that start time
+cannot separate are dropped.
+
+A match means "same event, same side" — **not** "same settlement rules". Review
+has found pairs matched perfectly on every structured field that still were not
+hedges, because the venues settle the tail differently: NPB games tie, NFL
+preseason has no overtime, ITF's lowest tiers are full of walkovers, F1 re-points
+a fastest-lap market at a substitute driver. `matching/hazards.py` records those
+as a lookup keyed on the Kalshi **series** rather than the league, because the
+series encodes the tier and market type that carry the signal (ATP main tour and
+ITF M15 diverge; F1 race winner and fastest lap diverge). A hazard flags a pair,
+it does not reject it, and the table was derived from the labeled negatives, so
+treat a new row as a hypothesis. Lines and props have no hazard rows at all.
+Resolution divergence stays a human judgement, carried per pair as
+`resolution_match` with its review cohort and notes.
+
+## Detection
+
+`detection/spread.py` holds two depth-walking operations, kept separate on
+purpose:
+
+- `compute_fill_price(depth, shares)` — fixed size in, average fill price out, or
+  None if the book is too thin. This is execution simulation for a size already
+  chosen (Phase 2), not detection.
+- `max_fillable_size(...)` — the detection workhorse. It walks both legs' ask
+  ladders in lockstep, one share of YES against one share of NO, and finds the
+  **largest** hedge that still clears the viability gate.
+
+Slippage is applied first and fees second. The walk produces depth-adjusted
+average fill prices, and each leg's taker fee is charged on those prices, never
+on top of book. Kalshi's fee is a function of the fill price (`0.07·p·(1−p)`) and
+is therefore accumulated **per depth level** and divided by the filled size at
+exit; because that curve is concave, charging it on the average price would
+overstate the blended fee and discard genuinely marginal opportunities.
+Polymarket's is flat per category. Both are normalized to **per-share** units
+before anything is compared — mixing per-contract with per-100-shares is a
+factor-of-100 error that makes the gate either never fire or fire on everything.
+
+The gate at each share count is
+
+```
+avg_yes_fill + avg_no_fill + yes_fee_per_share + no_fee_per_share + buffer < 1.00
+```
+
+and the greedy stop is exact: average fill prices are non-decreasing as size
+grows, since a larger order eats strictly worse levels, so once the legs alone
+cost `1 - buffer` no larger size can ever clear. `evaluate_pair` runs both
+directions (which venue supplies the YES leg) and keeps the better one, so one
+candidate covers both arb directions. When no size clears the fee gate it prices
+the hedge at a single contract — the top-of-book case — which charges the loss to
+fees rather than to slippage in the funnel.
+
+Three spread fields are recorded, each net of strictly more:
+`raw_spread_top_of_book` is before slippage and fees;
+`raw_spread_depth_adjusted` is after slippage, before fees; and
+`fee_adjusted_spread` is after both, the single viability number and the only
+gate the backtest reads. There is deliberately no separate post-fee slippage
+field: slippage is already embedded in the fill prices the fees are computed on.
+
+## Persistence and backtest
+
+Every recorded evaluation is dual-written to the JSONL sinks and to Postgres.
+`opportunities.jsonl` is the append-only time series and
+`opportunities_latest.jsonl` a keyed snapshot of one line per tracked pair;
+Postgres carries the same rows plus the latency fields and is the only source the
+survival analysis can use.
+
+The write grain is deliberately asymmetric, because a uniform throttle destroys
+the one thing the log exists to measure:
+
+- **every** evaluation while a pair is viable, unthrottled — a window opens and
+  closes on a book update, so duration resolution should come from the update
+  stream rather than from a timer;
+- a **close marker** on the first non-viable evaluation after a viable one, which
+  is the only thing that pins a window's end (the daily refresh writes its own
+  marker with a distinct reason for a pair it stopped watching, since censoring
+  and an observed close are opposite facts);
+- throttled **edge-change** rows for live games, whose edge actually moves;
+- otherwise a periodic **heartbeat**, which is the honest denominator: an absence
+  of rows cannot distinguish "watched and never viable" from "never watched", and
+  that ambiguity turns every rate into a floor instead of a measurement.
+  Heartbeats go to Postgres only, so the JSONL opportunity log stays a log of
+  opportunities.
+
+`pmarb/backtest` reads either source plus the current `matches.json`, and drops
+samples belonging to pairs the matcher has since retracted from both numerator
+and denominator. It writes `backtest_report.json`: the
+top-of-book → post-slippage → post-fee funnel overall and per match method, the
+spread and fillable-size distributions, window counts and persistence, the
+survival curve by elapsed time, detection latency, and the per-run caveats
+attached as data rather than as prose someone has to remember. A `--db` replay
+must be bounded with `--since`/`--until`, because the observation table pools runs
+that differed in coverage and a rate computed across them divides by a
+denominator that never existed.
 
 ## Running it
 
 ```bash
-python scripts/verify_auth.py                    # confirm both venues sign correctly
-python scripts/export_candidates.py              # rebuild matches.json
-python -m pmarb.main [DURATION_SECONDS]          # collect (Ctrl+C to stop)
-python -m pmarb.backtest.backtest [LOG] [MATCHES] [LATEST]
-pytest tests                                     # 265 tests
-ruff check .
+python scripts/verify_auth.py                       # both venues sign correctly
+python scripts/export_candidates.py                 # rebuild matches.json (+ review file)
+python scripts/seed_db.py                           # sync markets + pairs into Postgres
+python -m pmarb.main [DURATION_SECONDS]             # collect (Ctrl+C to stop)
+python -m pmarb.backtest.backtest                   # replay the JSONL sinks
+python -m pmarb.backtest.backtest --db --since ISO --until ISO   # replay Postgres
+docker compose up -d                                # Postgres + collector, restart-on-death
+pytest tests && ruff check .
 ```
 
-Credentials come from a gitignored `.env`; see `.env.example`. Kalshi signs with
-RSA-PSS, Polymarket US with Ed25519, and `scripts/verify_auth.py` proves both
-against live endpoints.
+Credentials come from a gitignored `.env` (Kalshi signs RSA-PSS, Polymarket US
+Ed25519). Design detail lives in module docstrings — `detection/spread.py` for
+the depth walk and fee accumulation, `refresh.py` for the refresh ordering, each
+matcher for how its identity is pulled off the wire.
 
-Design detail lives in module docstrings — `detection/spread.py` for the depth
-walk and fee accumulation, `matching/futures.py` and `matching/structured.py`
-for how each identity is extracted from the wire.
-
----
-
-## What this is not
-
-- Not a profitable trading system — Phase 1 places no orders.
-- Not evidence that live execution would be profitable. The persistence data
-  argues the opposite at retail latency.
-- Execution risk (leg 1 fills, leg 2 moves) is modeled nowhere and would only
-  subtract from these numbers.
+**What this is not**: not a profitable trading system — Phase 1 places no orders
+— and not evidence that live execution would be one. Execution risk (leg 1
+fills, leg 2 moves) is modeled nowhere and would only subtract.
